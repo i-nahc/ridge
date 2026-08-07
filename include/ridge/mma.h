@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-#include "ridge/Config.h"
+#include "ridge/config.h"
 
 namespace ridge {
 

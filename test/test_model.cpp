@@ -1,5 +1,5 @@
-#include "ridge/Model.h"
-#include "ridge/Hardware.h"
+#include "ridge/model.h"
+#include "ridge/hardware.h"
 
 #include <cstdio>
 

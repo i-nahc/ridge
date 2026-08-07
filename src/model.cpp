@@ -1,5 +1,5 @@
-#include "ridge/Model.h"
-#include "ridge/Mma.h"
+#include "ridge/model.h"
+#include "ridge/mma.h"
 
 #include <algorithm>
 #include <cmath>

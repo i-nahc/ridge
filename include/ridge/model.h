@@ -1,7 +1,7 @@
 #pragma once
-#include "ridge/Config.h"
-#include "ridge/Hardware.h"
-#include "ridge/Prediction.h"
+#include "ridge/config.h"
+#include "ridge/hardware.h"
+#include "ridge/prediction.h"
 
 namespace ridge {
 

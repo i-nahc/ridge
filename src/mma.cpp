@@ -1,4 +1,4 @@
-#include "ridge/Mma.h"
+#include "ridge/mma.h"
 
 namespace ridge {
 

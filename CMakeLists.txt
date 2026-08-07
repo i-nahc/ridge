@@ -10,9 +10,9 @@ endif()
 
 # The model library. Pure C++, no CUDA. This is Phase 1.
 add_library(ridge
-  src/Model.cpp
-  src/Hardware.cpp
-  src/Mma.cpp)
+  src/model.cpp
+  src/hardware.cpp
+  src/mma.cpp)
 target_include_directories(ridge PUBLIC include)
 
 # The CLI.

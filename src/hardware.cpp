@@ -1,4 +1,4 @@
-#include "ridge/Hardware.h"
+#include "ridge/hardware.h"
 
 namespace ridge {
 
