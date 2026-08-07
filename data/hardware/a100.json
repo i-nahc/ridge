@@ -1,0 +1,14 @@
+{
+  "name": "A100-80GB",
+  "note": "datasheet placeholders, replace with calibration (Phase 3). Loader is added in Phase 3; Phase 1 uses the built-in HardwareModel::a100() factory.",
+  "numSMs": 108,
+  "clockHz": 1.41e9,
+  "mmaCyclesPerInst": 2.0,
+  "smemBytesPerCycle": 128.0,
+  "hbmBytesPerSec": 2.0e12,
+  "regsPerSM": 65536,
+  "smemBytesPerSM": 167936,
+  "maxWarpsPerSM": 64,
+  "maxCtasPerSM": 32,
+  "warpsNeededToHide": 16.0
+}
