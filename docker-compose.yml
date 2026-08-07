@@ -1,0 +1,42 @@
+# Two services, one image.
+#
+#   dev  -> CPU only. Phase 1 (build the model, run tests, run ridge-predict).
+#           Works on a machine with no GPU.
+#   gpu  -> Phases 2 to 5. Needs an NVIDIA GPU and the nvidia-container-toolkit
+#           on the host (the cloud A100 box).
+#
+# Usage:
+#   docker compose build
+#   docker compose run --rm dev bash        # Phase 1
+#   docker compose run --rm gpu nvidia-smi  # confirm the GPU is visible, then work
+
+services:
+  dev:
+    build: .
+    image: ridge-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+
+  gpu:
+    build: .
+    image: ridge-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    # GPU access. Requires nvidia-container-toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # For Nsight Compute (ncu) profiling, perf counters need elevated caps.
+    # Uncomment when profiling in Phase 4:
+    # cap_add:
+    #   - SYS_ADMIN
+    stdin_open: true
+    tty: true
