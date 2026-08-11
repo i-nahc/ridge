@@ -21,9 +21,9 @@ target_link_libraries(ridge-predict PRIVATE ridge)
 
 # Tests.
 enable_testing()
-add_executable(test_model test/test_model.cpp)
-target_link_libraries(test_model PRIVATE ridge)
-add_test(NAME test_model COMMAND test_model)
+add_executable(test-model test/test-model.cpp)
+target_link_libraries(test-model PRIVATE ridge)
+add_test(NAME test-model COMMAND test-model)
 
 # bench/ is CUDA and is added in Phase 2, guarded by finding a CUDA toolkit.
 # include(CheckLanguage)
