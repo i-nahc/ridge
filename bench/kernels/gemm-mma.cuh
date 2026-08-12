@@ -25,6 +25,7 @@
 #pragma once
 
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <cstdint>
 
 namespace ridgebench {
@@ -287,5 +288,29 @@ template <int BM, int BN, int BK, int Stages>
 constexpr int smemBytesForConfig() {
     return Stages * (BM * BK + BK * BN) * static_cast<int>(sizeof(half));
 }
+
+// ---------------------------------------------------------------------------
+// The sweep table
+// ---------------------------------------------------------------------------
+
+// One entry in the config sweep. The fields mirror ridge::GemmConfig so that a
+// measured row and a predicted row line up field for field in Phase 4. The table
+// itself lives in gemm-mma.cu, which is also where the launchers are
+// instantiated, so every consumer of this header sees the same config space.
+struct KernelVariant {
+    int BM, BN, BK, WM, WN, stages;
+    int smemBytes;
+    int threads;
+    // Registers per thread as reported by ptxas -v for sm_80. A compile time
+    // fact, so it is recorded rather than measured on hardware, and it is the
+    // regsPerThread input the model needs for its occupancy term. Refresh with:
+    //   nvcc -arch=sm_80 -O3 -std=c++17 -Xptxas -v -c bench/kernels/gemm-mma.cu
+    int regsPerThread;
+    cudaError_t (*launch)(const half*, const half*, float*, int, int, int, cudaStream_t);
+};
+
+int numVariants();
+const KernelVariant& variant(int i);
+void printVariantTable();
 
 } // namespace ridgebench

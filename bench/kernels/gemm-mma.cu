@@ -14,20 +14,8 @@
 
 namespace ridgebench {
 
-// One entry in the sweep. The fields mirror ridge::GemmConfig so a measured row
-// and a predicted row line up field for field in Phase 4.
-struct KernelVariant {
-    int BM, BN, BK, WM, WN, stages;
-    int smemBytes;
-    int threads;
-    // Registers per thread as reported by ptxas -v for sm_80. This is a compile
-    // time fact, so it is recorded here rather than measured on hardware, and it
-    // is the regsPerThread input the model needs for its occupancy term. Refresh
-    // these if the kernel changes, with:
-    //   nvcc -arch=sm_80 -O3 -std=c++17 -Xptxas -v -c bench/kernels/gemm-mma.cu
-    int regsPerThread;
-    cudaError_t (*launch)(const half*, const half*, float*, int, int, int, cudaStream_t);
-};
+// KernelVariant is declared in gemm-mma.cuh so that measure.cu and check-gemm.cu
+// see the same config space. This file owns the table and the instantiations.
 
 template <int BM, int BN, int BK, int WM, int WN, int Stages>
 static cudaError_t launchVariant(const half* A, const half* B, float* C,
