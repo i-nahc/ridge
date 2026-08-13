@@ -42,6 +42,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -88,20 +89,35 @@ constexpr double kMaxElemTol = 5e-2;
 // 69.7 to 70.3 percent across seven runs, straddling the higher one, with the
 // pass or fail decided by which cuBLAS reading a run happened to draw.
 //
-// A move to a 0.69 floor was drafted and then withdrawn, and the reason is worth
-// keeping. Those seven runs were all taken with the SM clock pinned by
-// nvidia-smi -lgc 1410,1410, which was advice from this project's own tooling
-// notes rather than a property of the hardware. Unlocked, the same kernel
-// measures far higher against the same cuBLAS. So the measurements that
-// justified lowering the floor were taken in a regime that specifically
-// penalises this kernel, and lowering a gate on the strength of them would be
-// changing the bar to fit an artifact.
+// A move to a 0.69 floor was drafted, withdrawn, and then the reason for
+// withdrawing it turned out to be wrong too. The full sequence is worth keeping
+// because it is a compact case study in trusting a ratio.
 //
-// The floor stays at 0.70 until the measurement regime is settled on its own
-// merits, and the gate is then evaluated in whichever regime Phases 3 to 5 will
-// use. Pick the regime first, then measure. Not the reverse.
+// It looked briefly as though unlocking the SM clock lifted the kernel to 85%,
+// which would have meant the clock lock was penalising us and every measurement
+// behind the 0.69 proposal was taken in a bad regime. An A/B with absolute
+// numbers on both sides showed the opposite:
+//
+//   regime     our best        cuBLAS before      cuBLAS after
+//   unlocked   175.85          207.11 (66% peak)  242.65
+//   locked     180.09          256.04 (82% peak)  242.28
+//
+// Our kernel barely moves, and is slightly *faster* locked. What moved was
+// cuBLAS, because unlocked it was being timed during the clock ramp from an idle
+// 210 MHz. The 85% was cuBLAS measured badly, not the kernel measured well.
+//
+// So: the clock lock was correct, and the ratio was never the thing to watch.
+// The floor stays at 0.70. Whether it should move is a question to revisit once
+// the warmup below removes the ramp artifact and the numbers are stable, and it
+// should be decided on a clean measurement rather than on any of the readings
+// taken before this comment was written.
 constexpr double kMinCublasFraction = 0.70;
 constexpr double kTargetCublasFraction = 0.70;
+
+// Seconds of sustained load before any timing, to reach a steady clock and
+// thermal state. Five seconds comfortably covers the 210 MHz to 1410 MHz ramp
+// and lets the card settle into whatever sustained clock it can actually hold.
+constexpr double kWarmupSeconds = 5.0;
 
 constexpr int kWarmupIters = 20;
 constexpr int kTimedIters = 100;
@@ -244,6 +260,34 @@ void cublasReference(cublasHandle_t handle, const half* dA, const half* dB,
                               dC, CUDA_R_32F, N,
                               CUBLAS_COMPUTE_32F,
                               CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+}
+
+// Drives the GPU to a steady clock and thermal state before anything is timed.
+//
+// This exists because of a measured artifact, not out of caution. An idle A100
+// sits at 210 MHz against a 1410 MHz boost clock. The correctness section above
+// is CPU-heavy (a float64 reference GEMM), so by the time the performance
+// section starts the card has been effectively idle and has clocked all the way
+// down. Whatever is timed first then gets measured during the ramp.
+//
+// The size of the error was not subtle. cuBLAS measured 207 TFLOP/s as the first
+// timed workload in a process, 66% of datasheet peak, against 256 TFLOP/s once
+// the card was already at clock. Since cuBLAS is the denominator of every ratio
+// this file reports, that inflated our fraction by roughly 20% relative, and it
+// is the entire explanation for a "result" that briefly looked like 85%.
+//
+// The per-measurement warmup of kWarmupIters is not enough on its own: 20
+// iterations is far shorter than the ramp from 210 MHz.
+void warmUpGpu(cublasHandle_t handle, const half* A, const half* B, float* C,
+               int M, int N, int K, double seconds) {
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+               .count() < seconds) {
+        for (int i = 0; i < 10; ++i) {
+            cublasReference(handle, A, B, C, M, N, K);
+        }
+        cudaDeviceSynchronize();
+    }
 }
 
 double timeMs(void (*body)(void*), void* ctx) {
@@ -469,6 +513,12 @@ int main() {
         CUDA_CHECK(cudaMalloc(&dC, szC * sizeof(float)));
         CUDA_CHECK(cudaMemcpy(dA, hA.data(), szA * sizeof(half), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB, hB.data(), szB * sizeof(half), cudaMemcpyHostToDevice));
+
+        // Reach steady state before timing anything. Without this the first
+        // measurement in the process is taken during the clock ramp and is
+        // systematically slow, which silently biases every ratio below.
+        std::printf("  warming up to steady clock (%.0fs)...\n", kWarmupSeconds);
+        warmUpGpu(handle, dA, dB, dC, M, N, K, kWarmupSeconds);
 
         struct CublasCtx { cublasHandle_t h; const half* a; const half* b; float* c; int m, n, k; };
         CublasCtx cctx{handle, dA, dB, dC, M, N, K};
