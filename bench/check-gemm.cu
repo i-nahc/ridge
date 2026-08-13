@@ -397,9 +397,10 @@ int main() {
                                                  : errorStats(got, refGpu);
             const bool ok = (err.frob <= kRelTol) && (err.maxRel <= kMaxElemTol);
             if (!ok) failures++;
-            std::printf("  %-4s %5dx%5dx%5d tile %3dx%3dx%2d  frob %.3e  maxRel %.3e  (%s ref)  %s\n",
+            std::printf("  %-4s %5dx%5dx%5d tile %3dx%3dx%2d s%d w%2dx%2d  frob %.3e  maxRel %.3e  (%s ref)\n",
                         ok ? "ok" : "FAIL", s.M, s.N, s.K, kv.BM, kv.BN, kv.BK,
-                        err.frob, err.maxRel, useCpuReference ? "f64" : "cuBLAS", s.note);
+                        kv.stages, kv.WM, kv.WN,
+                        err.frob, err.maxRel, useCpuReference ? "f64" : "cuBLAS");
         }
 
         CUDA_CHECK(cudaFree(dA));

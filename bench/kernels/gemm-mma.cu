@@ -62,6 +62,36 @@ static const KernelVariant kVariants[] = {
     RIDGE_VARIANT(64, 128, 64, 32, 64, 4, 167),
     RIDGE_VARIANT(64, 64, 64, 32, 32, 4, 91),
     RIDGE_VARIANT(256, 128, 64, 64, 64, 3, 248),
+
+    // Narrow warp tiles at BK=32, added after the first hardware run.
+    //
+    // That run reached only 59.5% of cuBLAS and the reason was visible in the
+    // measurements: every config above tops out at 8 active warps per SM, which
+    // is 12.5% occupancy. A 64x64 warp tile needs (64/16)*(64/8)*4 = 128
+    // accumulator floats per thread before any addressing registers, and ptxas
+    // reports 224, so only one or two CTAs fit an SM.
+    //
+    // Halving the warp tile in N halves the accumulators and doubles the warps
+    // per CTA. The original table only ever paired a 64x32 warp tile with BK=64,
+    // where the shared memory footprint then collapses occupancy back to one
+    // CTA, so the combination that should actually work was never measured.
+    // These fill that hole. Register counts come from ptxas, see the note on
+    // KernelVariant.
+    // Registers drop from 224 to 124 for the same CTA tile, which is the whole
+    // point: 2 CTAs of 8 warps instead of 2 CTAs of 4, so 16 active warps and
+    // 25% occupancy rather than 12.5%.
+    RIDGE_VARIANT(128, 128, 32, 64, 32, 3, 124),
+    RIDGE_VARIANT(128, 128, 32, 64, 32, 4, 124),
+    RIDGE_VARIANT(128, 128, 32, 64, 32, 5, 124),
+    RIDGE_VARIANT(128, 128, 32, 32, 64, 4, 127),
+    RIDGE_VARIANT(128, 128, 32, 32, 32, 4, 95),
+    RIDGE_VARIANT(256, 128, 32, 64, 32, 3, 125),
+    RIDGE_VARIANT(128, 256, 32, 64, 32, 3, 125),
+
+    // 256x256x32 with a 64x64 warp tile was tried and removed. It needs 16 warps
+    // per CTA, so __launch_bounds__(512) caps ptxas at 128 registers while the
+    // accumulators alone want about 250, and it spills 628 bytes. A spilling
+    // kernel is not a fair ground truth, so it is not in the sweep.
 };
 
 #undef RIDGE_VARIANT
