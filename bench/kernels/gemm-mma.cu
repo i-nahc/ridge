@@ -33,7 +33,11 @@ static cudaError_t launchVariant(const half* A, const half* B, float* C,
         if (err != cudaSuccess) return err;
     }
 
-    dim3 grid(N / BN, M / BM);
+    // One dimensional grid. The kernel derives its output tile from a grouped
+    // launch order rather than from blockIdx.x and blockIdx.y directly, so that
+    // the CTAs resident at any moment share operands in L2. See the swizzle
+    // comment in gemm-mma.cuh.
+    dim3 grid((M / BM) * (N / BN));
     dim3 block(kThreads);
     kernel<<<grid, block, kSmem, stream>>>(A, B, C, M, N, K);
     return cudaGetLastError();

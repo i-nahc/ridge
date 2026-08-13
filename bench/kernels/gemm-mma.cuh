@@ -174,8 +174,33 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     const int warpM = warpId / kWarpsN;
     const int warpN = warpId % kWarpsN;
 
-    const int blockRow = blockIdx.y * BM;
-    const int blockCol = blockIdx.x * BN;
+    // CTA launch order, grouped along M so that neighbouring CTAs share operands
+    // in L2.
+    //
+    // The natural row-major order walks all of N before advancing M, so the
+    // CTAs live at any instant span the full B panel and only one A row band.
+    // Their combined footprint is large and L2 hit rate suffers. Grouping
+    // kGroupM row-tiles together means the CTAs in flight share both a small set
+    // of A rows and a small set of B columns, which is a much smaller working
+    // set for the same amount of work.
+    //
+    // This is the "block swizzle" that TileSight lists as a tile execution plan
+    // parameter and that tritonBLAS selects analytically, see docs/PAPERS.md. It
+    // changes no arithmetic, only which CTA computes which output tile, so it
+    // cannot affect correctness.
+    constexpr int kGroupM = 8;
+    const int numPidM = M / BM;
+    const int numPidN = N / BN;
+    const int pid = int(blockIdx.x);
+    const int numPidInGroup = kGroupM * numPidN;
+    const int groupId = pid / numPidInGroup;
+    const int firstPidM = groupId * kGroupM;
+    const int groupRows = min(numPidM - firstPidM, kGroupM);
+    const int pidM = firstPidM + ((pid % numPidInGroup) % groupRows);
+    const int pidN = (pid % numPidInGroup) / groupRows;
+
+    const int blockRow = pidM * BM;
+    const int blockCol = pidN * BN;
 
     float acc[kTilesM][kTilesN][4];
 #pragma unroll
@@ -285,12 +310,19 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
         for (int j = 0; j < kTilesN; ++j) {
             const int rowBase = blockRow + warpM * WM + i * kMmaM + laneId / 4;
             const int colBase = blockCol + warpN * WN + j * kMmaN + (laneId % 4) * 2;
-#pragma unroll
-            for (int e = 0; e < 4; ++e) {
-                const int row = rowBase + (e / 2) * 8;
-                const int col = colBase + (e % 2);
-                C[row * N + col] = acc[i][j][e];
-            }
+            // c0 and c1 are adjacent in N, and so are c2 and c3 eight rows
+            // below. Writing each pair as one 8 byte store halves the number of
+            // store instructions and doubles the transaction width. The old
+            // version issued four scattered 4 byte stores per accumulator tile,
+            // which is the worst case for the coalescer.
+            //
+            // Alignment holds because colBase is always even, N is a multiple of
+            // BN and BN is at least 64, so row*N + colBase is even and the float2
+            // lands on an 8 byte boundary.
+            *reinterpret_cast<float2*>(&C[size_t(rowBase) * N + colBase]) =
+                make_float2(acc[i][j][0], acc[i][j][1]);
+            *reinterpret_cast<float2*>(&C[size_t(rowBase + 8) * N + colBase]) =
+                make_float2(acc[i][j][2], acc[i][j][3]);
         }
     }
 }
