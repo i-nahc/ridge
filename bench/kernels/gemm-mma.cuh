@@ -302,28 +302,58 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
         }
     }
 
-    // Epilogue. The m16n8k16 accumulator layout puts c0 and c1 on row lane/4 and
-    // c2 and c3 eight rows below, with the column pair at (lane%4)*2.
+    // Epilogue, staged through shared memory so the global stores are fully
+    // coalesced.
+    //
+    // The reason this is worth the complexity: the m16n8k16 accumulator layout
+    // puts lane l at row l/4 and column (l%4)*2, so a warp's 32 lanes cover an
+    // 8 by 8 patch of C. Writing that straight to global means every store
+    // instruction touches 8 separate rows, and no amount of widening the
+    // individual store fixes that, because the rows are N floats apart. Direct
+    // 4 byte stores and direct 8 byte stores are both bad for the same reason.
+    //
+    // Bouncing through shared memory decouples the accumulator layout from the
+    // global layout. Warps scatter their accumulators into a shared C tile, then
+    // all threads cooperatively stream it out in 16 byte chunks, so each warp
+    // emits fully contiguous 128 byte transactions.
+    //
+    // Measured basis for doing this: swapping four 4 byte stores for two 8 byte
+    // stores was worth about four points of cuBLAS, far more than the CTA
+    // swizzle was, which identified the epilogue as the binding cost rather than
+    // a rounding error.
+    __syncthreads();
+
+    // Row stride padded by 4 floats. Unpadded, a BN=128 row is exactly 512
+    // bytes, so every row starts on bank 0 and the scatter phase below
+    // serialises across the 8 rows a warp touches. Padding by 4 floats breaks
+    // that while keeping the 16 byte alignment the streaming phase needs.
+    constexpr int kEpiStride = BN + 4;
+    float* smemC = reinterpret_cast<float*>(smem);
+
 #pragma unroll
     for (int i = 0; i < kTilesM; ++i) {
 #pragma unroll
         for (int j = 0; j < kTilesN; ++j) {
-            const int rowBase = blockRow + warpM * WM + i * kMmaM + laneId / 4;
-            const int colBase = blockCol + warpN * WN + j * kMmaN + (laneId % 4) * 2;
-            // c0 and c1 are adjacent in N, and so are c2 and c3 eight rows
-            // below. Writing each pair as one 8 byte store halves the number of
-            // store instructions and doubles the transaction width. The old
-            // version issued four scattered 4 byte stores per accumulator tile,
-            // which is the worst case for the coalescer.
-            //
-            // Alignment holds because colBase is always even, N is a multiple of
-            // BN and BN is at least 64, so row*N + colBase is even and the float2
-            // lands on an 8 byte boundary.
-            *reinterpret_cast<float2*>(&C[size_t(rowBase) * N + colBase]) =
-                make_float2(acc[i][j][0], acc[i][j][1]);
-            *reinterpret_cast<float2*>(&C[size_t(rowBase + 8) * N + colBase]) =
-                make_float2(acc[i][j][2], acc[i][j][3]);
+            const int r0 = warpM * WM + i * kMmaM + laneId / 4;
+            const int c0 = warpN * WN + j * kMmaN + (laneId % 4) * 2;
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                smemC[(r0 + (e / 2) * 8) * kEpiStride + c0 + (e % 2)] = acc[i][j][e];
+            }
         }
+    }
+    __syncthreads();
+
+    // Stream the tile out. Consecutive threads take consecutive 16 byte chunks
+    // of the same row, so a warp covers 512 contiguous bytes per instruction.
+    constexpr int kVecPerRow = BN / 4;
+    for (int idx = int(threadIdx.x); idx < BM * kVecPerRow; idx += kThreads) {
+        const int r = idx / kVecPerRow;
+        const int c = idx % kVecPerRow;
+        const float4 v =
+            *reinterpret_cast<const float4*>(&smemC[r * kEpiStride + c * 4]);
+        *reinterpret_cast<float4*>(
+            &C[size_t(blockRow + r) * N + blockCol + c * 4]) = v;
     }
 }
 
@@ -332,9 +362,17 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
 // carveout, and Phase 3 compares it against the model's smemBytesPerCta.
 // Must match the padded layout in padOffset exactly. If this under-counts, the
 // kernel writes past the end of its dynamic shared memory allocation.
+//
+// The allocation has to cover two different uses of the same buffer: the
+// multi-stage operand pipeline during the main loop, and the C tile staged
+// through shared memory in the epilogue after the loop is done. They never
+// overlap in time, so the requirement is the larger of the two, not the sum.
 template <int BM, int BN, int BK, int Stages>
 constexpr int smemBytesForConfig() {
-    return Stages * (BM * (BK + 8) + BK * (BN + 8)) * static_cast<int>(sizeof(half));
+    const int pipeline =
+        Stages * (BM * (BK + 8) + BK * (BN + 8)) * static_cast<int>(sizeof(half));
+    const int epilogue = BM * (BN + 4) * static_cast<int>(sizeof(float));
+    return pipeline > epilogue ? pipeline : epilogue;
 }
 
 // ---------------------------------------------------------------------------
