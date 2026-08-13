@@ -82,6 +82,22 @@ __device__ __forceinline__ void ldmatrixX2Trans(uint32_t addr, uint32_t (&d)[2])
                  : "r"(addr));
 }
 
+// Loads two adjacent B fragments in one instruction.
+//
+// The x2 form above fetches the 16 by 8 operand for a single N tile, so a warp
+// tile of WN=64 needs eight of them per K step. The x4 form fetches four 8 by 8
+// matrices, which is exactly two N tiles worth, halving the B side instruction
+// count from eight to four. Same bytes moved, half the issue slots.
+//
+// The four matrices come back as {b0(j), b1(j), b0(j+1), b1(j+1)} given the lane
+// to address mapping in the caller, which is why the caller can split the result
+// straight into two fragments with no shuffling.
+__device__ __forceinline__ void ldmatrixX4Trans(uint32_t addr, uint32_t (&d)[4]) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(addr));
+}
+
 // One warp level FP16 multiply accumulate into FP32 accumulators.
 __device__ __forceinline__ void mmaM16N8K16(float (&c)[4],
                                             const uint32_t (&a)[4],
@@ -150,6 +166,9 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     static_assert(WN % kMmaN == 0, "the warp tile must divide into mma tiles along N");
     static_assert(BK % kMmaK == 0, "BK must be a whole number of mma K steps");
     static_assert(BK % 8 == 0 && BN % 8 == 0, "tile rows must be a whole number of 16 byte chunks");
+    static_assert((WN / kMmaN) % 2 == 0,
+                  "the B operand is loaded two N tiles at a time, so WN must be a "
+                  "multiple of 2*mmaN");
 
     // Per warp mma tile counts. These are the same quantities the model uses to
     // compute mmasPerWarpPerStep, see docs/MODEL.md section 2.
@@ -298,13 +317,22 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
                 const int kOff = kStep * kMmaK + (mi / 2) * 8;
                 ldmatrixX4(smemAddr(curA + padOffset<BK>(row, kOff / 8)), fragA[i]);
             }
+            // Two N tiles per instruction. Lane l addresses matrix l/8, row
+            // l%8, so matrices 0 and 1 supply the k 0-7 and k 8-15 halves of
+            // tile j, and matrices 2 and 3 do the same for tile j+1 eight
+            // columns over.
 #pragma unroll
-            for (int j = 0; j < kTilesN; ++j) {
-                const int mi = (laneId % 16) / 8;
+            for (int j = 0; j < kTilesN; j += 2) {
+                const int mi = laneId / 8;
                 const int rowInTile = laneId % 8;
-                const int kRow = kStep * kMmaK + mi * 8 + rowInTile;
-                const int nOff = warpN * WN + j * kMmaN;
-                ldmatrixX2Trans(smemAddr(curB + padOffset<BN>(kRow, nOff / 8)), fragB[j]);
+                const int kRow = kStep * kMmaK + (mi % 2) * 8 + rowInTile;
+                const int nOff = warpN * WN + j * kMmaN + (mi / 2) * 8;
+                uint32_t pair[4];
+                ldmatrixX4Trans(smemAddr(curB + padOffset<BN>(kRow, nOff / 8)), pair);
+                fragB[j][0] = pair[0];
+                fragB[j][1] = pair[1];
+                fragB[j + 1][0] = pair[2];
+                fragB[j + 1][1] = pair[3];
             }
 #pragma unroll
             for (int i = 0; i < kTilesM; ++i)
