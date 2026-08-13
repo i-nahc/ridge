@@ -236,9 +236,21 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
 
     // Prologue. Fill every buffer but the last so the first main loop iteration
     // already has work in flight behind it.
+    //
+    // The bound check matters. When K is small enough that numKTiles is less
+    // than Stages-1, an unguarded prologue issues copies for K-tiles that do not
+    // exist, which reads past the end of A and B and leaves stray writes landing
+    // in shared memory buffers long after the main loop has moved on. With
+    // Stages=4 and BK=64, a K of 64 gives numKTiles=1 and issues two such
+    // phantom tiles. An empty commit keeps the wait_group accounting uniform,
+    // exactly as in the tail below.
 #pragma unroll
     for (int s = 0; s < Stages - 1; ++s) {
-        loadTile(s, s);
+        if (s < numKTiles) {
+            loadTile(s, s);
+        } else {
+            cpAsyncCommit();
+        }
     }
 
     uint32_t fragA[kTilesM][4];
@@ -321,6 +333,18 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     // stores was worth about four points of cuBLAS, far more than the CTA
     // swizzle was, which identified the epilogue as the binding cost rather than
     // a rounding error.
+    //
+    // WAITING HERE IS NOT OPTIONAL. This buffer is the operand pipeline, and any
+    // cp.async still in flight will land in it after we start writing C. A
+    // barrier alone does not help, because __syncthreads() synchronises threads
+    // and says nothing about outstanding asynchronous copies. wait_group<0>
+    // drains every committed group first.
+    //
+    // This was a real bug, not a hypothetical. The first version of this
+    // epilogue omitted the wait and silently corrupted C for configs where the
+    // prologue had issued phantom tiles, and because it is a race it corrupted
+    // only some of them on any given run.
+    cpAsyncWaitGroup<0>();
     __syncthreads();
 
     // Row stride padded by 4 floats. Unpadded, a BN=128 row is exactly 512
