@@ -459,8 +459,8 @@ int main() {
             }, &kctx);
             const double tflops = flops / (ms * 1e-3) / 1e12;
             if (tflops > bestTflops) { bestTflops = tflops; bestIdx = v; }
-            std::printf("  tile %3dx%3dx%2d stages %d warp %2dx%2d  %8.2f TFLOP/s  %5.1f%% of cuBLAS\n",
-                        kv.BM, kv.BN, kv.BK, kv.stages, kv.WM, kv.WN,
+            std::printf("  tile %3dx%3dx%2d s%d w%2dx%2d g%-2d  %8.2f TFLOP/s  %5.1f%% of cuBLAS\n",
+                        kv.BM, kv.BN, kv.BK, kv.stages, kv.WM, kv.WN, kv.groupM,
                         tflops, 100.0 * tflops / cublasTflops);
         }
 
@@ -468,7 +468,7 @@ int main() {
         std::printf("\n  best: %.2f TFLOP/s, %.1f%% of cuBLAS", bestTflops, fraction * 100.0);
         if (bestIdx >= 0) {
             const ridgebench::KernelVariant& kv = ridgebench::variant(bestIdx);
-            std::printf(" (tile %dx%dx%d stages %d)", kv.BM, kv.BN, kv.BK, kv.stages);
+            std::printf(" (tile %dx%dx%d s%d w%dx%d g%d)", kv.BM, kv.BN, kv.BK, kv.stages, kv.WM, kv.WN, kv.groupM);
         }
         std::printf("\n");
 

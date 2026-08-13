@@ -132,7 +132,7 @@ __device__ __forceinline__ int padOffset(int row, int chunk) {
 // The kernel
 // ---------------------------------------------------------------------------
 
-template <int BM, int BN, int BK, int WM, int WN, int Stages>
+template <int BM, int BN, int BK, int WM, int WN, int Stages, int GroupM>
 __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     const half* __restrict__ A,
     const half* __restrict__ B,
@@ -188,7 +188,7 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     // parameter and that tritonBLAS selects analytically, see docs/PAPERS.md. It
     // changes no arithmetic, only which CTA computes which output tile, so it
     // cannot affect correctness.
-    constexpr int kGroupM = 8;
+    constexpr int kGroupM = GroupM;
     const int numPidM = M / BM;
     const int numPidN = N / BN;
     const int pid = int(blockIdx.x);
@@ -347,6 +347,11 @@ constexpr int smemBytesForConfig() {
 // instantiated, so every consumer of this header sees the same config space.
 struct KernelVariant {
     int BM, BN, BK, WM, WN, stages;
+    // CTA launch-order group size along M. This is a real tile execution plan
+    // parameter, the "block swizzle" in TileSight's terms, so it belongs in the
+    // sweep rather than hardcoded. groupM of 1 is plain row-major order, which
+    // makes it the control.
+    int groupM;
     int smemBytes;
     int threads;
     // Registers per thread as reported by ptxas -v for sm_80. A compile time
