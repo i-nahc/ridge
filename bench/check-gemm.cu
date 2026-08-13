@@ -76,10 +76,51 @@ constexpr double kMaxElemTol = 5e-2;
 
 // Fraction of cuBLAS the best config must reach. Below this the kernel is not a
 // fair stand-in for a tuned kernel and any later accuracy claim is meaningless.
+//
+// 0.69 is a floor, not the goal. 0.70 remains the target.
+//
+// The history matters, because moving a gate is exactly the thing the
+// anti-patterns forbid and this one was moved deliberately rather than quietly.
+// The original 0.70 was written into PLAN.md before any hardware existed and has
+// no source: it is not from any of the four papers in docs/PAPERS.md, and SPEC
+// independently said "within about 2x of cuBLAS", which is 0.50. So the project
+// held two different unsourced numbers. Measurement then put the kernel at
+// 69.7 to 70.3 percent across seven runs, straddling the higher one, with the
+// pass or fail decided by which cuBLAS reading a run happened to draw.
+//
+// A move to a 0.69 floor was drafted and then withdrawn, and the reason is worth
+// keeping. Those seven runs were all taken with the SM clock pinned by
+// nvidia-smi -lgc 1410,1410, which was advice from this project's own tooling
+// notes rather than a property of the hardware. Unlocked, the same kernel
+// measures far higher against the same cuBLAS. So the measurements that
+// justified lowering the floor were taken in a regime that specifically
+// penalises this kernel, and lowering a gate on the strength of them would be
+// changing the bar to fit an artifact.
+//
+// The floor stays at 0.70 until the measurement regime is settled on its own
+// merits, and the gate is then evaluated in whichever regime Phases 3 to 5 will
+// use. Pick the regime first, then measure. Not the reverse.
 constexpr double kMinCublasFraction = 0.70;
+constexpr double kTargetCublasFraction = 0.70;
 
 constexpr int kWarmupIters = 20;
 constexpr int kTimedIters = 100;
+
+// Dense FP16-in FP32-accumulate tensor peak for the A100, from the datasheet.
+// Used only as an absolute anchor for the sanity checks below, never as a
+// achieved number. See docs/MODEL.md section 8.
+constexpr double kA100PeakTflops = 312.0;
+
+// cuBLAS is expected to land near this fraction of datasheet peak on a healthy,
+// clock-locked A100. Materially below it means cuBLAS is being measured badly,
+// which silently inflates our ratio, rather than meaning our kernel improved.
+constexpr double kCublasExpectedPeakFraction = 0.75;
+
+// Largest tolerated drift between the cuBLAS measurement taken before the sweep
+// and the one taken after it. Drift means the machine changed underneath the
+// run, usually unlocked clocks or thermal throttling, and every ratio in between
+// is then untrustworthy.
+constexpr double kCublasDriftTolerance = 0.02;
 
 #define CUDA_CHECK(call)                                                        \
     do {                                                                        \
@@ -435,9 +476,18 @@ int main() {
             CublasCtx* c = static_cast<CublasCtx*>(p);
             cublasReference(c->h, c->a, c->b, c->c, c->m, c->n, c->k);
         }, &cctx);
-        const double cublasTflops = flops / (cublasMs * 1e-3) / 1e12;
-        std::printf("  cuBLAS                            %8.2f TFLOP/s\n", cublasTflops);
+        const double cublasTflopsBefore = flops / (cublasMs * 1e-3) / 1e12;
+        std::printf("  cuBLAS (before sweep)             %8.2f TFLOP/s  %5.1f%% of %.0f datasheet peak\n",
+                    cublasTflopsBefore,
+                    100.0 * cublasTflopsBefore / kA100PeakTflops, kA100PeakTflops);
 
+        // The denominator is the best cuBLAS reading, not the first or the mean.
+        // A ratio is only meaningful against cuBLAS at its best, and taking the
+        // best is the conservative choice: a slow cuBLAS reading can no longer
+        // inflate our fraction. Filled in after the second measurement below.
+        double cublasTflops = cublasTflopsBefore;
+
+        std::vector<std::pair<int, double>> results;
         double bestTflops = 0.0;
         int bestIdx = -1;
         for (int v = 0; v < nVariants; ++v) {
@@ -459,9 +509,52 @@ int main() {
             }, &kctx);
             const double tflops = flops / (ms * 1e-3) / 1e12;
             if (tflops > bestTflops) { bestTflops = tflops; bestIdx = v; }
+            results.push_back({v, tflops});
+        }
+
+        // Re-measure cuBLAS after the sweep.
+        //
+        // The ratio has two sides and only one of them is our kernel. If cuBLAS
+        // degrades partway through a run, every fraction printed afterwards is
+        // inflated, and the run looks like an improvement that never happened.
+        // Measuring the same workload at both ends catches that directly.
+        const double cublasMsAfter = timeMs([](void* p) {
+            CublasCtx* c = static_cast<CublasCtx*>(p);
+            cublasReference(c->h, c->a, c->b, c->c, c->m, c->n, c->k);
+        }, &cctx);
+        const double cublasTflopsAfter = flops / (cublasMsAfter * 1e-3) / 1e12;
+        std::printf("  cuBLAS (after sweep)              %8.2f TFLOP/s  %5.1f%% of %.0f datasheet peak\n",
+                    cublasTflopsAfter,
+                    100.0 * cublasTflopsAfter / kA100PeakTflops, kA100PeakTflops);
+
+        cublasTflops = std::max(cublasTflopsBefore, cublasTflopsAfter);
+
+        const double drift =
+            std::fabs(cublasTflopsAfter - cublasTflopsBefore) / cublasTflopsBefore;
+        if (drift > kCublasDriftTolerance) {
+            std::printf("\n  WARNING: cuBLAS drifted %.1f%% between the two measurements.\n"
+                        "  The machine changed underneath this run, so every ratio below is\n"
+                        "  suspect. Usual causes: clocks not locked (nvidia-smi -lgc 1410,1410),\n"
+                        "  thermal throttling, or another process on the GPU. Fix and re-run\n"
+                        "  before believing any number here.\n", drift * 100.0);
+            failures++;
+        }
+        if (cublasTflops < kA100PeakTflops * kCublasExpectedPeakFraction) {
+            std::printf("\n  WARNING: cuBLAS reached only %.1f%% of datasheet peak, well below the\n"
+                        "  %.0f%% a healthy A100 should hit. A slow cuBLAS inflates our fraction\n"
+                        "  without our kernel improving at all, so treat a high ratio here as a\n"
+                        "  measurement fault until explained.\n",
+                        100.0 * cublasTflops / kA100PeakTflops,
+                        kCublasExpectedPeakFraction * 100.0);
+            failures++;
+        }
+
+        std::printf("\n");
+        for (const auto& r : results) {
+            const ridgebench::KernelVariant& kv = ridgebench::variant(r.first);
             std::printf("  tile %3dx%3dx%2d s%d w%2dx%2d g%-2d  %8.2f TFLOP/s  %5.1f%% of cuBLAS\n",
                         kv.BM, kv.BN, kv.BK, kv.stages, kv.WM, kv.WN, kv.groupM,
-                        tflops, 100.0 * tflops / cublasTflops);
+                        r.second, 100.0 * r.second / cublasTflops);
         }
 
         const double fraction = cublasTflops > 0.0 ? bestTflops / cublasTflops : 0.0;
@@ -477,6 +570,13 @@ int main() {
                         "ground truth yet, so do not start model validation.\n",
                         kMinCublasFraction * 100.0);
             failures++;
+        } else if (fraction < kTargetCublasFraction) {
+            // Passing the floor but under target is a real state and it gets
+            // said out loud. A silent pass here would let "cleared the gate"
+            // drift into "hit the target" the next time someone writes a summary.
+            std::printf("  PASS on the %.0f%% floor, but below the %.0f%% target. "
+                        "Report the measured fraction, never just \"passed\".\n",
+                        kMinCublasFraction * 100.0, kTargetCublasFraction * 100.0);
         }
 
         CUDA_CHECK(cudaFree(dA));
