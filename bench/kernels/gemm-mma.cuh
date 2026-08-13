@@ -97,21 +97,35 @@ __device__ __forceinline__ void mmaM16N8K16(float (&c)[4],
 // Shared memory swizzle
 // ---------------------------------------------------------------------------
 
-// Shared memory tiles are stored row major in 16 byte chunks of 8 halves. A
-// plain row major layout makes the 8 rows that ldmatrix reads land in the same
-// banks, so we permute the chunk index within each row by XOR with the row
-// index. Padding the rows would be the other classic fix, but padding breaks the
-// 16 byte alignment that cp.async requires, so XOR swizzling is the option that
-// keeps both working.
+// Shared memory tiles are stored row major in 16 byte chunks of 8 halves, with
+// every row padded by one extra chunk.
 //
-// This is conflict free when a row holds 8 chunks, which means BK of 64 for the
-// A tile and BN of 64 for the B tile. Narrower rows wrap the XOR and leave a two
-// way conflict. That is a known cost of the small BK configs and the sweep will
-// show it, which is exactly the kind of surprise the model should explain.
+// The problem being solved: ldmatrix has 8 lanes read 8 consecutive rows at the
+// same column offset. With an unpadded row stride those 8 addresses collide in
+// the shared memory banks and the access serialises.
+//
+// This originally used an XOR swizzle on the chunk index, on the reasoning that
+// padding would break the 16 byte alignment cp.async requires. That reasoning
+// was wrong in a useful way. Padding by a whole 16 byte chunk keeps every row
+// start 16 byte aligned, so cp.async is happy, and it spreads the banks cleanly.
+// The XOR version was only conflict free when a row held exactly 8 chunks, which
+// none of the interesting BK=32 configs do, so it left a two way conflict
+// exactly where it hurt most.
+//
+// Why 8 halves of padding is the right amount, for a row of R halves. The stride
+// becomes (R + 8) halves, which is (R + 8) * 2 bytes, and bank index advances by
+// ((R + 8) * 2 / 4) mod 32 = ((R + 8) / 2) mod 32 per row. For R = 32 that is 20
+// per row, giving banks 0, 20, 8, 28, 16, 4, 24, 12 across the 8 rows, which are
+// distinct and cover all 32 banks with the 4 banks each 16 byte access touches.
+// For R = 64, 128 and 256 the step is 4 per row, giving 0, 4, 8 ... 28, also
+// distinct. So every row width in the sweep is conflict free.
+//
+// The cost is shared memory: a BK=32 A tile grows from 32 to 40 halves per row.
+// That can cost one resident CTA, but every config in the sweep is already
+// register limited at or below that count, so in practice it costs nothing.
 template <int RowHalves>
-__device__ __forceinline__ int swizzledOffset(int row, int chunk) {
-    constexpr int kChunksPerRow = RowHalves / 8;
-    return (row * kChunksPerRow + (chunk ^ (row % kChunksPerRow))) * 8;
+__device__ __forceinline__ int padOffset(int row, int chunk) {
+    return row * (RowHalves + 8) + chunk * 8;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +162,8 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
     constexpr int kChunksA = BM * kChunksPerRowA;
     constexpr int kChunksB = BK * kChunksPerRowB;
 
-    constexpr int kSmemHalvesA = BM * BK;
-    constexpr int kSmemHalvesB = BK * BN;
+    constexpr int kSmemHalvesA = BM * (BK + 8);
+    constexpr int kSmemHalvesB = BK * (BN + 8);
 
     extern __shared__ half smem[];
     half* smemA = smem;
@@ -183,14 +197,14 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
             const int row = i / kChunksPerRowA;
             const int chunk = i % kChunksPerRowA;
             const half* src = A + (blockRow + row) * K + kTile * BK + chunk * 8;
-            cpAsyncCg16(smemAddr(dstA + swizzledOffset<BK>(row, chunk)), src);
+            cpAsyncCg16(smemAddr(dstA + padOffset<BK>(row, chunk)), src);
         }
 #pragma unroll
         for (int i = threadIdx.x; i < kChunksB; i += kThreads) {
             const int row = i / kChunksPerRowB;
             const int chunk = i % kChunksPerRowB;
             const half* src = B + (kTile * BK + row) * N + blockCol + chunk * 8;
-            cpAsyncCg16(smemAddr(dstB + swizzledOffset<BN>(row, chunk)), src);
+            cpAsyncCg16(smemAddr(dstB + padOffset<BN>(row, chunk)), src);
         }
         cpAsyncCommit();
     };
@@ -245,7 +259,7 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
                 const int rowInTile = laneId % 8;
                 const int row = warpM * WM + i * kMmaM + (mi % 2) * 8 + rowInTile;
                 const int kOff = kStep * kMmaK + (mi / 2) * 8;
-                ldmatrixX4(smemAddr(curA + swizzledOffset<BK>(row, kOff / 8)), fragA[i]);
+                ldmatrixX4(smemAddr(curA + padOffset<BK>(row, kOff / 8)), fragA[i]);
             }
 #pragma unroll
             for (int j = 0; j < kTilesN; ++j) {
@@ -253,7 +267,7 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
                 const int rowInTile = laneId % 8;
                 const int kRow = kStep * kMmaK + mi * 8 + rowInTile;
                 const int nOff = warpN * WN + j * kMmaN;
-                ldmatrixX2Trans(smemAddr(curB + swizzledOffset<BN>(kRow, nOff / 8)), fragB[j]);
+                ldmatrixX2Trans(smemAddr(curB + padOffset<BN>(kRow, nOff / 8)), fragB[j]);
             }
 #pragma unroll
             for (int i = 0; i < kTilesM; ++i)
@@ -284,9 +298,11 @@ __global__ __launch_bounds__((BM / WM) * (BN / WN) * 32) void gemmMmaKernel(
 // Shared memory bytes the kernel needs for a given config. measure.cu uses this
 // both to size the dynamic allocation and to opt into the large shared memory
 // carveout, and Phase 3 compares it against the model's smemBytesPerCta.
+// Must match the padded layout in padOffset exactly. If this under-counts, the
+// kernel writes past the end of its dynamic shared memory allocation.
 template <int BM, int BN, int BK, int Stages>
 constexpr int smemBytesForConfig() {
-    return Stages * (BM * BK + BK * BN) * static_cast<int>(sizeof(half));
+    return Stages * (BM * (BK + 8) + BK * (BN + 8)) * static_cast<int>(sizeof(half));
 }
 
 // ---------------------------------------------------------------------------
