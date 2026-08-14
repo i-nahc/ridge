@@ -1,0 +1,52 @@
+# Ridge Phase 4 pre-registered validation sweep.
+#
+# THIS FILE IS REGISTERED BEFORE ANY MEASUREMENT EXISTS. That is the point.
+# PLAN.md anti-pattern 8 requires the problem shapes and tile configs to be fixed
+# and committed before any error number is seen, so that the Phase 4 accuracy
+# result cannot be produced by quietly dropping the configs the model gets wrong.
+#
+# Rules for changing this file, from the Phase 4 gate:
+#   - Widening it is fine and is an improvement.
+#   - Narrowing it, or re-registering after seeing an error number, is the thing
+#     being prevented. Any change must be a separate commit that states what
+#     changed and why, and human-review checkpoint 3 reads this file's commit
+#     history rather than trusting that validate.py passed.
+#
+# The tile configs are not listed here. They are the kVariants table in
+# bench/kernels/gemm-mma.cu, which is equally registered: measure.cu crosses
+# every shape below with every variant that divides it. That cross product is the
+# sweep.
+#
+# Every M and N below is a multiple of 256 and every K a multiple of 64, so every
+# variant in the table is compatible with every shape. Nothing is skipped, which
+# means no config can quietly drop out of the sweep by an alignment accident.
+#
+# Shapes are chosen to exercise the model's known blind spots, not to flatter it.
+# Findings 1, 5 and 6 predict specific failures, and a sweep of only large square
+# GEMMs would hide all three:
+#
+#   Finding 1 (no L2 reuse): arithmetic intensity in the model depends only on the
+#     tile, not on the problem. Shapes with very different K at the same tile
+#     shape should expose that.
+#   Finding 5 (no prologue/epilogue term): the model predicts steady state only,
+#     so it over-predicts when the K-step count is not much larger than the
+#     pipeline depth. The short-K shapes target this directly.
+#   Finding 6 (no wave quantization): the model assumes the CTA grid divides
+#     evenly across 108 SMs. The small shapes produce grids far smaller than one
+#     full wave, where the error should be largest.
+#
+# M,N,K,tag,rationale
+4096,4096,4096,canonical,matches the docs/MODEL.md section 9 worked example so prediction and measurement meet on the same config
+8192,8192,8192,many-waves,4096 CTAs at 128x128 is about 38 waves over 108 SMs so wave quantization error should be smallest here
+6144,6144,4096,non-power-of-two,2304 CTAs is 21.3 waves and the dimensions are not powers of two
+3072,3072,3072,non-power-of-two-small,576 CTAs is 5.3 waves so the partial tail wave is a larger fraction
+2048,2048,2048,moderate,256 CTAs is 2.4 waves and the tail is a third of the work
+1024,1024,1024,sub-wave,64 CTAs at 128x128 is fewer than the 108 SMs so the GPU never fills once, worst case for Finding 6
+512,512,4096,tiny-grid-deep-k,16 CTAs is extreme wave quantization while K stays long enough for steady state to dominate per CTA
+4096,4096,512,short-k,16 K-steps at BK=32 against a pipeline depth of about 5, Finding 5 should start to show
+4096,4096,256,shorter-k,8 K-steps, prologue and epilogue are a large fraction of the kernel
+4096,4096,128,very-short-k,4 K-steps at BK=32 and only 2 at BK=64, pipeline fill dominates and the model should over-predict badly
+1024,4096,4096,small-m,non-square with few row tiles, tests that the model does not assume a square grid
+4096,1024,4096,small-n,non-square the other way, different L2 reuse pattern from small-m
+8192,2048,4096,wide-m,large non-square, A panel reuse dominates
+2048,8192,1024,wide-n,large non-square the other way with moderate K
