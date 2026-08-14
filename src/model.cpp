@@ -159,9 +159,22 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
         hw.hbmBytesPerSec / (hw.clockHz * double(hw.numSMs));
     const double tileBytes = double(cfg.BM * cfg.BK + cfg.BK * cfg.BN) * db;
     const double kSteps = double(cfg.K) / cfg.BK;
-    const double tPrologue = double(cfg.stages - 1) * tileBytes / gmemBytesPerCycle;
+    // Both are divided by ctasPerSM. Nothing synchronises CTAs with each other:
+    // barriers are per-CTA, CTAs finish at different times, and new ones launch
+    // as slots free. So with ctasPerSM resident, one CTA's fill and drain run
+    // while the others are in steady state, and only the SM's first fill and
+    // last drain are genuinely exposed. Charging every CTA the full cost
+    // over-derates by exactly this factor (PLAN.md Finding 19).
+    //
+    // Nsight Compute corroborates the size of the correction, and was not used
+    // to fit it. At a fixed tile config with only K varying, the tensor pipe
+    // utilisation ratio between K=4096 and K=128 measures 2.0x. The first
+    // version of this term predicted 6.3x. This version predicts 2.2x.
+    const double tPrologue =
+        double(cfg.stages - 1) * tileBytes / gmemBytesPerCycle / ctasPerSM;
     // Accumulators are fp32 regardless of the input dtype, so 4 bytes per element.
-    const double tEpilogue = double(cfg.BM) * cfg.BN * 4.0 / gmemBytesPerCycle;
+    const double tEpilogue =
+        double(cfg.BM) * cfg.BN * 4.0 / gmemBytesPerCycle / ctasPerSM;
     const double tBody = kSteps * tStep;
     const double envelopeEfficiency =
         tBody / (tPrologue + tBody + tEpilogue);

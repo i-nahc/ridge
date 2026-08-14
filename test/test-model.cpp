@@ -87,19 +87,19 @@ int main() {
         //   kSteps    4096/32 = 128
         //   gmemBpc   2.0e12 / (1.41e9 x 108) = 13.133701 B/cycle
         //   tileBytes (128x32 + 32x128) x 2 = 16384
-        //   tPrologue (3-1) x 16384 / 13.133701 = 2494.955520
-        //   tEpilogue 128 x 128 x 4 / 13.133701 = 4989.911040
+        //   tPrologue (3-1) x 16384 / 13.133701 / 3 =  831.651840  (shared across 3 CTAs)
+        //   tEpilogue 128 x 128 x 4 / 13.133701 / 3 = 1663.303680
         //   tBody     128 x 768 = 98304
-        //   envEff    98304 / (2494.955520 + 98304 + 4989.911040) = 0.929247
+        //   envEff    98304 / (831.651840 + 98304 + 1663.303680) = 0.975248
         CHECK_NEAR(p.kSteps,               128.0,        1e-9);
-        CHECK_NEAR(p.tPrologueCycles,      2494.955520,  1e-4);
-        CHECK_NEAR(p.tEpilogueCycles,      4989.911040,  1e-4);
+        CHECK_NEAR(p.tPrologueCycles,       831.651840,  1e-4);
+        CHECK_NEAR(p.tEpilogueCycles,      1663.303680,  1e-4);
         CHECK_NEAR(p.tBodyCycles,          98304.0,      1e-6);
-        CHECK_NEAR(p.envelopeEfficiency,   0.929247,     1e-6);
+        CHECK_NEAR(p.envelopeEfficiency,   0.975248,     1e-6);
 
         CHECK_NEAR(p.peakTensorTFLOPS,     311.869440, 0.001);
-        // 311.869440 x 0.666667 x 0.75 x 0.790123 x 0.929247 = 114.490382
-        CHECK_NEAR(p.computeTFLOPS,        114.490382, 1e-4);
+        // 311.869440 x 0.666667 x 0.75 x 0.790123 x 0.975248 = 120.158068
+        CHECK_NEAR(p.computeTFLOPS,        120.158068, 1e-4);
 
         // L2 reuse across the wave: sqrt(324) = 18 exactly.
         CHECK_NEAR(p.baseIntensity,        64.0,   1e-9);
@@ -110,7 +110,7 @@ int main() {
         // HBM no longer binds anywhere near this config, which is the point of
         // the L2 term. The compute side binds and the worst derating factor is
         // smEfficiency at 0.667, the ldmatrix traffic feeding the tensor cores.
-        CHECK_NEAR(p.predictedTFLOPS,      114.490382, 1e-4);
+        CHECK_NEAR(p.predictedTFLOPS,      120.158068, 1e-4);
         CHECK(p.bottleneck == Bottleneck::Smem);
     }
 
@@ -133,11 +133,11 @@ int main() {
         CHECK_NEAR(p.totalCtas,      16.0,          1e-9);
         CHECK_NEAR(p.ctaSlots,       324.0,         1e-9);
         CHECK_NEAR(p.waveEfficiency, 16.0 / 324.0,  1e-9);
-        // 311.869440 x 0.666667 x 0.75 x 0.049383 x 0.929247 = 7.155649.
+        // 311.869440 x 0.666667 x 0.75 x 0.049383 x 0.975248 = 7.509879.
         // waveEfficiency at 0.0494 is by far the worst factor, so WAVES is the
         // label even though smEfficiency and the envelope also derate.
-        CHECK_NEAR(p.computeTFLOPS,   7.155649,     1e-4);
-        CHECK_NEAR(p.predictedTFLOPS, 7.155649,     1e-4);
+        CHECK_NEAR(p.computeTFLOPS,   7.509879,     1e-4);
+        CHECK_NEAR(p.predictedTFLOPS, 7.509879,     1e-4);
         CHECK(p.bottleneck == Bottleneck::Waves);
     }
 
