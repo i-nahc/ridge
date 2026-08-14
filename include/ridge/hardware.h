@@ -32,7 +32,28 @@ struct HardwareModel {
 
     // Built-in placeholder model. Phase 3 replaces this by loading a calibrated
     // data/hardware/*.json.
+    //
+    // WARNING: hbmBytesPerSec here is the A100 80GB figure while the project
+    // measures on a 40GB card, so this model currently describes hardware that
+    // is not under test. See PLAN.md Finding 10. Prefer loadFromJson.
     static HardwareModel a100();
+
+    // Loads a calibrated model from a data/hardware/*.json written by
+    // bench/calibrate/run-calibration.py.
+    //
+    // Returns false and leaves `out` untouched if the file is missing,
+    // unparseable, or missing any required key. Partially loading a hardware
+    // model would be worse than not loading one: the caller would get a mix of
+    // measured and placeholder constants with no way to tell which was which,
+    // and would then report predictions as calibrated. So this is all or
+    // nothing, and `err` says what went wrong.
+    static bool loadFromJson(const std::string& path, HardwareModel& out,
+                             std::string& err);
+
+    // True when every [CAL] constant came from a calibration file rather than
+    // from the built-in placeholders. Predictions from an uncalibrated model are
+    // indicative only and anything reporting results should say so.
+    bool calibrated = false;
 };
 
 } // namespace ridge
