@@ -105,35 +105,53 @@ fi
 printf 'none\n'
 
 # ---------------------------------------------------------------------------
-say "4. Calibrated hardware model"
+say "4. Calibrate this card"
 # ---------------------------------------------------------------------------
-HW=$(ls data/hardware/*.json 2>/dev/null | grep -v -- '-placeholder' | head -1 || true)
-CAL_HW="data/hardware/a100-sxm4-40gb.json"
-
-if [ -f "$CAL_HW" ]; then
-    printf '  found %s\n' "$CAL_HW"
-    printf '  NOTE: these constants were measured on a *previous* box. Any\n'
-    printf '        A100-SXM4-40GB should reproduce them within noise, but if you\n'
-    printf '        want them measured on this card, re-run:\n'
-    printf '          python3 bench/calibrate/run-calibration.py\n'
-else
-    printf '  NOT PRESENT. The model will fall back to placeholder constants,\n'
-    printf '  which include the wrong cards HBM spec (PLAN.md Finding 10).\n'
-    printf '  Run this before any validation:\n'
-    printf '    python3 bench/calibrate/run-calibration.py\n'
+# Calibration is run every session, on every box, deliberately.
+#
+# SPEC section 9 requires calibrating and validating on the same physical card.
+# Carrying a json forward from a previous box breaks that: the constants would
+# describe one piece of silicon and the sweep another, and nothing downstream
+# would flag it. Recalibrating costs about two minutes against a sweep that costs
+# five, so the efficiency argument for reusing an old file is worth very little
+# and the correctness argument against it is absolute.
+#
+# It also removes a whole failure class. A stale json is invisible once written,
+# and "which box did these constants come from" is not a question anyone will
+# think to ask three weeks later.
+#
+# Running it here rather than leaving it as a step means it cannot be forgotten
+# on the fourth box of the day, which is exactly when it would be.
+if [ -f data/hardware/a100-sxm4-40gb.json ]; then
+    printf '  a previous json exists and will be overwritten by this run\n'
 fi
+
+python3 bench/calibrate/run-calibration.py || fail "calibration failed.
+  A constant outside its sanity band means the microbenchmark is wrong, not that
+  the hardware is surprising. Do not widen the band. See PLAN.md anti-patterns
+  7 and 8."
 
 # ---------------------------------------------------------------------------
 say "Ready"
 # ---------------------------------------------------------------------------
 cat <<'EOF'
-  ./build/check-gemm                        Phase 2 gate
-  python3 bench/calibrate/run-calibration.py  Phase 3, writes data/hardware/<gpu>.json
-  ./build/measure                           Phase 4 sweep, 4-8 min, use tmux
-  python3 bench/validate.py                 Phase 4 gate
+  ./build/check-gemm          Phase 2 gate
+  ./build/measure             Phase 4 sweep, 4-8 min, use tmux
+  python3 bench/validate.py   Phase 4 gate
 
-  Before destroying this box, commit and push anything under data/:
-    git add data/ && git commit -m "measurements" && git push
-  Instance storage is ephemeral and an unpushed calibration run is a paid-for
-  result thrown away.
+  GETTING RESULTS OFF THIS BOX
+
+  Do not push from here, and do not put a git credential or an SSH key with
+  write access on a rented machine. It is shared infrastructure you do not
+  control, the disk is not yours, and the box is destroyed later by someone
+  else. The clone above is public over HTTPS and needs no credential, so this
+  box only ever pulls.
+
+  Pull the results down from your own machine instead:
+
+    scp ubuntu@<this-box-ip>:~/ridge/data/measured/a100.csv       data/measured/
+    scp ubuntu@<this-box-ip>:'~/ridge/data/hardware/*.json'        data/hardware/
+
+  Then commit from there. Instance storage is ephemeral, so anything under
+  data/ that has not been copied off is a paid-for result thrown away.
 EOF
