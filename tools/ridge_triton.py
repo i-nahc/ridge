@@ -34,7 +34,29 @@ import subprocess
 from pathlib import Path
 
 PREDICT_BIN = Path("build/ridge-predict")
-HW_JSON = Path("data/hardware/a100-fresh.json")
+
+
+def _find_hw_json():
+    """Locate a calibrated hardware model, or None to fall back to placeholders.
+
+    setup-box.sh writes data/hardware/<gpu-name>.json on a fresh box, while the
+    committed development snapshot is a100-fresh.json. Search rather than
+    hardcode, because falling back to placeholder constants silently would make
+    every prediction here wrong in a way nothing else would catch.
+    """
+    d = Path("data/hardware")
+    if not d.is_dir():
+        return None
+    preferred = d / "a100-sxm4-40gb.json"
+    if preferred.exists():
+        return preferred
+    for name in sorted(p.name for p in d.glob("*.json")):
+        if name != "a100.json":  # a100.json is the datasheet placeholder
+            return d / name
+    return None
+
+
+HW_JSON = _find_hw_json()
 
 
 def infer_warp_tile(block_m, block_n, num_warps):
@@ -68,7 +90,7 @@ def _predict(m, n, k, bm, bn, bk, wm, wn, stages, regs):
         "--warpm", str(wm), "--warpn", str(wn),
         "--stages", str(stages), "--regs", str(regs),
     ]
-    if HW_JSON.exists():
+    if HW_JSON is not None:
         cmd += ["--hw", str(HW_JSON)]
     else:
         cmd += ["--gpu", "a100"]
