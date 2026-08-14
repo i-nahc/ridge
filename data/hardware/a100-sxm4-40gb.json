@@ -1,0 +1,14 @@
+{
+  "name": "A100-SXM4-40GB",
+  "note": "measured by bench/calibrate/run-calibration.py 2026-08-11, clocks locked at 1410",
+  "numSMs": 108,
+  "clockHz": 1.41e9,
+  "mmaCyclesPerInst": 2.026082,
+  "smemBytesPerCycle": 127.876869,
+  "hbmBytesPerSec": 1.462449e+12,
+  "regsPerSM": 65536,
+  "smemBytesPerSM": 167936,
+  "maxWarpsPerSM": 64,
+  "maxCtasPerSM": 32,
+  "warpsNeededToHide": 4
+}
