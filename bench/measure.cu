@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -206,6 +207,26 @@ int main(int argc, char** argv) {
     std::printf("registered sweep: %s, %zu shapes, %d variants\n",
                 sweepPath, shapes.size(), ridgebench::numVariants());
 
+    // Prove the output is writable before doing any work.
+    //
+    // git does not track empty directories, so data/measured/ is absent from a
+    // fresh clone and ofstream will not create parents. Discovering that after
+    // the warmup and the sweep means throwing away minutes of GPU time that
+    // somebody is paying for by the hour. Fail in the first second instead.
+    {
+        std::error_code ec;
+        const std::filesystem::path p(outPath);
+        if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+        std::ofstream probe(outPath, std::ios::app);
+        if (!probe) {
+            std::fprintf(stderr,
+                         "cannot write %s\n"
+                         "Create the directory first:  mkdir -p %s\n",
+                         outPath, p.parent_path().string().c_str());
+            return 2;
+        }
+    }
+
     // Allocate once for the largest shape and reuse. Repeated allocation of
     // hundreds of megabytes between shapes would fragment and would also put
     // allocator time inside the measured region.
@@ -247,7 +268,11 @@ int main(int argc, char** argv) {
 
     std::ofstream out(outPath);
     if (!out) {
-        std::fprintf(stderr, "cannot write %s\n", outPath);
+        std::fprintf(stderr,
+                     "cannot write %s\n"
+                     "Check the directory exists and is writable:  mkdir -p %s\n",
+                     outPath,
+                     std::filesystem::path(outPath).parent_path().string().c_str());
         return 2;
     }
     out << "# Ridge Phase 4 ground-truth measurements\n"
