@@ -2,7 +2,12 @@
 
 namespace ridge {
 
-enum class Bottleneck { TensorCore, Smem, Hbm, Occupancy, DoesNotFit };
+// Waves is distinct from Occupancy on purpose. Occupancy means too few warps
+// resident on an SM to hide latency. Waves means too few CTAs in the grid to
+// fill the machine at all, so SMs sit idle no matter how well occupied the busy
+// ones are. They are different failures at different levels and they want
+// different fixes, so collapsing them would make the diagnosis less useful.
+enum class Bottleneck { TensorCore, Smem, Hbm, Occupancy, Waves, DoesNotFit };
 
 const char* toString(Bottleneck b);
 
@@ -18,6 +23,15 @@ struct Prediction {
     double smEfficiency = 0.0;        // tCompute / tStep, 1.0 = never waits on smem
     double occFactor = 0.0;           // latency-hiding factor, 1.0 = fully hidden
     double arithmeticIntensity = 0.0; // FLOP per global byte (per-CTA, no L2 reuse in v1)
+
+    // Wave quantization (SPEC 4.5 item 3, PLAN.md Findings 6 and 12).
+    // waveEfficiency is the fraction of the machine busy averaged over the
+    // kernel: 1.0 when the CTA grid divides evenly into concurrent slots, and as
+    // low as totalCtas/ctaSlots when the grid is smaller than one wave.
+    double waveEfficiency = 0.0;
+    double totalCtas = 0.0;           // grid size, (M/BM) * (N/BN)
+    double ctaSlots = 0.0;            // ctasPerSM * numSMs, concurrent capacity
+    double wavesExact = 0.0;          // totalCtas / ctaSlots, before rounding up
 
     int numWarps = 0;
     int ctasPerSM = 0;

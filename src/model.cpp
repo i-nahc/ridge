@@ -12,6 +12,7 @@ const char* toString(Bottleneck b) {
         case Bottleneck::Smem:       return "SMEM";
         case Bottleneck::Hbm:        return "HBM";
         case Bottleneck::Occupancy:  return "OCC";
+        case Bottleneck::Waves:      return "WAVES";
         case Bottleneck::DoesNotFit: return "DOES_NOT_FIT";
     }
     return "UNKNOWN";
@@ -70,12 +71,45 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
     const double occFactor = std::min(1.0, activeWarps / hw.warpsNeededToHide);
     p.occFactor = occFactor;
 
+    // --- Wave quantization (SPEC 4.5 item 3) ---
+    //
+    // The GPU runs ctasPerSM * numSMs CTAs concurrently. A grid that is not a
+    // whole multiple of that finishes with a partial wave in which most SMs sit
+    // idle, and a grid smaller than one wave never fills the machine at all.
+    //
+    // Total time is ceil(waves) * timePerWave, so the fraction of the machine
+    // doing useful work, averaged over the kernel, is
+    //     totalCtas / (ceil(waves) * ctaSlots)
+    //
+    // This is exact when every CTA takes the same time, which holds for a
+    // uniform dense GEMM. It is an approximation for ragged work, because real
+    // hardware refills slots from a queue rather than in lock step.
+    //
+    // Measured justification, not just borrowed: the Phase 4 baseline found the
+    // model's ranking ability tracks wave count with rank correlation 0.754 and
+    // *inverts* below about 5 waves, reaching Spearman -0.882 at 0.15 waves.
+    // Without this term the model prefers exactly the large tiles that leave the
+    // GPU idle on small problems. See PLAN.md Finding 12.
+    const double ctaSlots = ctasPerSM * double(hw.numSMs);
+    const double totalCtas =
+        double((cfg.M / cfg.BM) * (cfg.N / cfg.BN));
+    const double wavesExact = totalCtas / ctaSlots;
+    const double fullWaves = std::ceil(wavesExact);
+    const double waveEfficiency =
+        fullWaves > 0.0 ? totalCtas / (fullWaves * ctaSlots) : 1.0;
+
+    p.ctaSlots = ctaSlots;
+    p.totalCtas = totalCtas;
+    p.wavesExact = wavesExact;
+    p.waveEfficiency = waveEfficiency;
+
     // --- Two ceilings (SPEC 4.4) ---
     // Compute ceiling. The SM tensor peak is fixed. Occupancy does not multiply
     // it, it only hides latency (occFactor). Do NOT scale by ctasPerSM.
     const double peakTensorTFLOPS =
         (double(mma.flops) / hw.mmaCyclesPerInst) * hw.clockHz * hw.numSMs / 1e12;
-    const double computeTFLOPS = peakTensorTFLOPS * smEfficiency * occFactor;
+    const double computeTFLOPS =
+        peakTensorTFLOPS * smEfficiency * occFactor * waveEfficiency;
     p.peakTensorTFLOPS = peakTensorTFLOPS;
     p.computeTFLOPS = computeTFLOPS;
 
@@ -91,11 +125,22 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
     p.hbmTFLOPS = hbmTFLOPS;
 
     // --- Prediction and bottleneck ---
+    //
+    // When the compute side binds, the label names whichever derating factor is
+    // furthest from 1.0, rather than testing them in a fixed order. A fixed
+    // order silently reports the first thing below threshold even when another
+    // factor is hurting twice as much, which would make the attribution a
+    // lookup rather than a diagnosis.
     p.predictedTFLOPS = std::min(computeTFLOPS, hbmTFLOPS);
-    if (hbmTFLOPS < computeTFLOPS)      p.bottleneck = Bottleneck::Hbm;
-    else if (smEfficiency < 0.95)       p.bottleneck = Bottleneck::Smem;
-    else if (occFactor < 0.95)          p.bottleneck = Bottleneck::Occupancy;
-    else                                p.bottleneck = Bottleneck::TensorCore;
+    if (hbmTFLOPS < computeTFLOPS) {
+        p.bottleneck = Bottleneck::Hbm;
+    } else {
+        const double worst = std::min(std::min(smEfficiency, occFactor), waveEfficiency);
+        if (worst >= 0.95)                    p.bottleneck = Bottleneck::TensorCore;
+        else if (worst == waveEfficiency)     p.bottleneck = Bottleneck::Waves;
+        else if (worst == smEfficiency)       p.bottleneck = Bottleneck::Smem;
+        else                                  p.bottleneck = Bottleneck::Occupancy;
+    }
 
     return p;
 }

@@ -69,12 +69,51 @@ int main() {
         CHECK_NEAR(p.smEfficiency,         1.00,   1e-9);
         CHECK_NEAR(p.ctasPerSM,            3,      0);
         CHECK_NEAR(p.occFactor,            0.75,   1e-9);
+
+        // Wave quantization, hand-derived:
+        //   grid           4096/128 x 4096/128 = 32 x 32 = 1024 CTAs
+        //   slots          3 CTAs/SM x 108 SMs = 324
+        //   waves          1024 / 324 = 3.1605 -> ceil 4
+        //   waveEfficiency 1024 / (4 x 324) = 1024/1296 = 0.790123
+        CHECK_NEAR(p.totalCtas,            1024.0, 1e-9);
+        CHECK_NEAR(p.ctaSlots,             324.0,  1e-9);
+        CHECK_NEAR(p.wavesExact,           1024.0 / 324.0, 1e-9);
+        CHECK_NEAR(p.waveEfficiency,       1024.0 / 1296.0, 1e-9);
+
         CHECK_NEAR(p.peakTensorTFLOPS,     311.9,  0.05);
-        CHECK_NEAR(p.computeTFLOPS,        233.9,  0.05);
+        // 311.87 x 1.00 x 0.75 x 0.790123 = 184.81, was 233.90 before waves
+        CHECK_NEAR(p.computeTFLOPS,        184.81, 0.05);
         CHECK_NEAR(p.arithmeticIntensity,  64.0,   1e-9);
         CHECK_NEAR(p.hbmTFLOPS,            128.0,  0.05);
+        // HBM still binds, so the headline prediction is unchanged at 128.0.
         CHECK_NEAR(p.predictedTFLOPS,      128.0,  0.05);
         CHECK(p.bottleneck == Bottleneck::Hbm);
+    }
+
+    // Wave quantization: a grid smaller than one wave should be WAVES-bound and
+    // derated hard. Hand-derived for 512x512x4096 on the placeholder model:
+    //   grid   512/128 x 512/128 = 4 x 4 = 16 CTAs
+    //   slots  324, so waves = 16/324 = 0.0494 -> ceil 1
+    //   waveEfficiency = 16 / (1 x 324) = 0.049383
+    // This is the config the Phase 4 baseline mispredicted by +1109%.
+    {
+        GemmConfig cfg;
+        cfg.M = cfg.N = 512;
+        cfg.K = 4096;
+        cfg.BM = 128; cfg.BN = 128; cfg.BK = 32;
+        cfg.warpM = 64; cfg.warpN = 64;
+        cfg.stages = 3;
+        cfg.regsPerThread = 128;
+
+        const Prediction p = predict(cfg, hw);
+        CHECK_NEAR(p.totalCtas,      16.0,          1e-9);
+        CHECK_NEAR(p.ctaSlots,       324.0,         1e-9);
+        CHECK_NEAR(p.waveEfficiency, 16.0 / 324.0,  1e-9);
+        // 311.87 x 1.00 x 0.75 x 0.049383 = 11.55, far under the 128.0 HBM
+        // ceiling, so the compute side now binds and the label says why.
+        CHECK_NEAR(p.computeTFLOPS,  11.55,         0.05);
+        CHECK_NEAR(p.predictedTFLOPS, 11.55,        0.05);
+        CHECK(p.bottleneck == Bottleneck::Waves);
     }
 
     // Peak sanity: A100 FP16 dense tensor peak is ~312 TFLOPS.

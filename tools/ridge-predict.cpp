@@ -5,6 +5,7 @@
 #include <sstream>
 #include <vector>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -174,5 +175,7 @@ int main(int argc, char** argv) {
     std::printf("  smem eff: %.2f   occ factor: %.2f   arith intensity: %.1f FLOP/byte\n",
                 p.smEfficiency, p.occFactor, p.arithmeticIntensity);
     std::printf("  warps/CTA: %d   CTAs/SM: %d\n", p.numWarps, p.ctasPerSM);
+    std::printf("  grid: %.0f CTAs in %.0f slots   waves: %.2f   wave eff: %.3f\n",
+                p.totalCtas, p.ctaSlots, p.wavesExact, p.waveEfficiency);
     return 0;
 }
