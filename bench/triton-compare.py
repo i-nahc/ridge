@@ -36,6 +36,7 @@ sys.path.insert(0, "tools")
 from ridge_triton import estimated_seconds, infer_warp_tile  # noqa: E402
 
 TOP_K = 8
+K_SWEEP = [1, 2, 3, 4, 5, 6, 8, 10]
 
 
 # The config list from Triton's own matmul tutorial. Not curated by us, which is
@@ -141,6 +142,7 @@ def main():
         "shape", "cfgs", "stock s", "ridge s", "speedup", "regret", "same pick"))
 
     tot_stock = tot_ridge = 0.0
+    curve = {k: [] for k in K_SWEEP}
     regrets = []
     same = 0
     for M, N, K, tag in SHAPES:
@@ -174,15 +176,24 @@ def main():
         scored.sort()
         model_wall = time.perf_counter() - t0
 
-        shortlist = [i for _, i in scored[:TOP_K] if i in timings]
+        # Sweep the shortlist size. Every config is already timed, so the whole
+        # tradeoff curve costs nothing extra, and a single top_k chosen in
+        # advance would just be a guess about where quality breaks.
+        ranked = [i for _, i in scored if i in timings]
+        per_cfg = stock_wall / max(len(timings), 1)
+        for k in K_SWEEP:
+            if k > len(ranked):
+                continue
+            pick = min(ranked[:k], key=timings.get)
+            reg = (timings[pick] - timings[stock_pick]) / timings[stock_pick] * 100
+            wall = model_wall + per_cfg * k
+            curve[k].append((reg, pick == stock_pick, stock_wall, wall))
+
+        shortlist = ranked[:TOP_K]
         if not shortlist:
             print("%-18s   ridge shortlist all failed" % tag)
             continue
         ridge_pick = min(shortlist, key=timings.get)
-
-        # Ridge's tuning cost: the model, plus benchmarking only the shortlist.
-        # Estimated from measured per-config time so both arms use one timing set.
-        per_cfg = stock_wall / max(len(timings), 1)
         ridge_wall = model_wall + per_cfg * len(shortlist)
 
         regret = (timings[ridge_pick] - timings[stock_pick]) / timings[stock_pick] * 100
@@ -204,6 +215,20 @@ def main():
         print("max regret vs stock pick   %.2f%%" % max(regrets))
         print("total tuning time          stock %.1fs -> ridge %.1fs (%.2fx)" % (
             tot_stock, tot_ridge, tot_stock / tot_ridge))
+        print()
+        print("shortlist size vs quality. stock benchmarks every config and is")
+        print("always optimal, so regret is measured against its pick.")
+        print()
+        print("  %5s %10s %12s %12s %10s" % ("top_k", "speedup", "same pick", "mean regret", "max regret"))
+        for k in K_SWEEP:
+            rows = curve[k]
+            if not rows:
+                continue
+            sp = sum(r[2] for r in rows) / sum(r[3] for r in rows)
+            hits = sum(1 for r in rows if r[1])
+            mr = sum(r[0] for r in rows) / len(rows)
+            xr = max(r[0] for r in rows)
+            print("  %5d %9.2fx %9d/%-2d %11.2f%% %9.2f%%" % (k, sp, hits, len(rows), mr, xr))
 
 
 if __name__ == "__main__":
