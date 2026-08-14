@@ -13,6 +13,7 @@ const char* toString(Bottleneck b) {
         case Bottleneck::Hbm:        return "HBM";
         case Bottleneck::Occupancy:  return "OCC";
         case Bottleneck::Waves:      return "WAVES";
+        case Bottleneck::Envelope:   return "ENVELOPE";
         case Bottleneck::DoesNotFit: return "DOES_NOT_FIT";
     }
     return "UNKNOWN";
@@ -57,10 +58,27 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
         double(numWarps) * (cfg.warpM + cfg.warpN) * cfg.BK * db;
     const double tSmem = smemBytesPerStep / hw.smemBytesPerCycle;
 
-    const double tStep = std::max(tCompute, tSmem);
+    // These add, they do not overlap (PLAN.md Finding 17, docs/MODEL.md section 3).
+    //
+    // The two memory paths into a CTA are not alike, and the difference is in the
+    // ISA rather than in the tuning. cp.async moves global to shared
+    // asynchronously, which is its whole purpose: the warp issues it and keeps
+    // going. That path really does overlap compute and belongs under a max.
+    //
+    // ldmatrix moves shared to register synchronously and the very next mma
+    // consumes the registers it just wrote, so the warp cannot issue that mma
+    // until the ldmatrix feeding it has landed. Our kernel makes this concrete:
+    // within a K-step a warp issues all its ldmatrix, then all its mma. Warps in
+    // a CTA run the same code between the same barriers, so they enter those
+    // phases together rather than covering for each other.
+    //
+    // Measured, not assumed. On the 336-row A100 sweep with every other term
+    // held fixed, max gives MAPE 36.17% and the sum gives 30.15%.
+    const double tStep = tCompute + tSmem;
     const double smEfficiency = tCompute / tStep;
     p.tComputeCycles = tCompute;
     p.tSmemCycles = tSmem;
+    p.tStepCycles = tStep;
     p.smEfficiency = smEfficiency;
 
     // --- Occupancy (SPEC 4.3) ---
@@ -120,24 +138,78 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
     p.wavesExact = wavesExact;
     p.waveEfficiency = waveEfficiency;
 
+    // --- Envelope: prologue and epilogue (SPEC 4.6, docs/MODEL.md section 5) ---
+    //
+    // Everything above is a steady-state rate, but a kernel does not begin in
+    // steady state. The software pipeline has to fill before the first mma can
+    // issue, and after the last mma the accumulators still have to be written
+    // out. TileSight writes this as
+    //     T = T_pro + max(N - d, 0) * T_steady + T_epi
+    // (docs/PAPERS.md section 2).
+    //
+    // stages-1 is how many tiles are in flight before the first
+    // cp.async.wait_group can retire, so it is how many tile loads happen with
+    // nothing to overlap them.
+    //
+    // There is deliberately no fixed DRAM-latency term here. An earlier draft had
+    // one. It was a guess, nothing in bench/calibrate/ measures it, and sweeping
+    // it from 0 to 2400 cycles made both MAPE and rank correlation slightly
+    // worse. See PLAN.md anti-pattern 10.
+    const double gmemBytesPerCycle =
+        hw.hbmBytesPerSec / (hw.clockHz * double(hw.numSMs));
+    const double tileBytes = double(cfg.BM * cfg.BK + cfg.BK * cfg.BN) * db;
+    const double kSteps = double(cfg.K) / cfg.BK;
+    const double tPrologue = double(cfg.stages - 1) * tileBytes / gmemBytesPerCycle;
+    // Accumulators are fp32 regardless of the input dtype, so 4 bytes per element.
+    const double tEpilogue = double(cfg.BM) * cfg.BN * 4.0 / gmemBytesPerCycle;
+    const double tBody = kSteps * tStep;
+    const double envelopeEfficiency =
+        tBody / (tPrologue + tBody + tEpilogue);
+
+    p.kSteps = kSteps;
+    p.tPrologueCycles = tPrologue;
+    p.tEpilogueCycles = tEpilogue;
+    p.tBodyCycles = tBody;
+    p.envelopeEfficiency = envelopeEfficiency;
+
     // --- Two ceilings (SPEC 4.4) ---
     // Compute ceiling. The SM tensor peak is fixed. Occupancy does not multiply
     // it, it only hides latency (occFactor). Do NOT scale by ctasPerSM.
     const double peakTensorTFLOPS =
         (double(mma.flops) / hw.mmaCyclesPerInst) * hw.clockHz * hw.numSMs / 1e12;
-    const double computeTFLOPS =
-        peakTensorTFLOPS * smEfficiency * occFactor * waveEfficiency;
+    const double computeTFLOPS = peakTensorTFLOPS * smEfficiency * occFactor *
+                                 waveEfficiency * envelopeEfficiency;
     p.peakTensorTFLOPS = peakTensorTFLOPS;
     p.computeTFLOPS = computeTFLOPS;
 
-    // HBM roofline. NOTE (v1 limitation): per-CTA global bytes assume no L2 reuse
-    // of A row-panels and B col-panels, so arithmetic intensity is underestimated
-    // and this ceiling is pessimistic. Adding L2 reuse is the first Phase 4 fix
-    // (see PLAN.md Known Issue 1).
+    // HBM roofline, with L2 reuse across the wave (PLAN.md Known Issue 1, now
+    // closed).
+    //
+    // baseIntensity assumes each CTA fetches its own A row-panel and B col-panel
+    // from DRAM with no sharing, which is wrong. The CTAs resident at one instant
+    // are a wave, and a wave covers a roughly square region of the output, about
+    // sqrt(ctaSlots) tiles on a side. Every CTA in a tile-row of that region wants
+    // the same A panel and every CTA in a tile-column wants the same B panel, so
+    // one DRAM fetch serves about sqrt(ctaSlots) consumers through L2. That is a
+    // geometric argument about the wave, not a fitted constant, and it is the same
+    // working-set reasoning tritonBLAS uses to pick its group size
+    // (docs/PAPERS.md section 3).
+    //
+    // Still an idealisation: it assumes the wave is square and that L2 holds the
+    // panels as long as the wave needs them, and it has no capacity term, so it
+    // is optimistic for very large tiles.
+    //
+    // This must not be applied without the envelope above. On its own it takes
+    // MAPE from 36.17% to 141.16%, because the too-low HBM ceiling had been
+    // standing in for the missing fill and drain cost. See PLAN.md Finding 17.
     const double globalBytesPerCta = double(cfg.BM * cfg.K + cfg.K * cfg.BN) * db;
     const double flopsPerCta = 2.0 * double(cfg.BM) * cfg.BN * cfg.K;
-    const double arithmeticIntensity = flopsPerCta / globalBytesPerCta;
+    const double baseIntensity = flopsPerCta / globalBytesPerCta;
+    const double l2ReuseFactor = std::sqrt(ctaSlots);
+    const double arithmeticIntensity = baseIntensity * l2ReuseFactor;
     const double hbmTFLOPS = hw.hbmBytesPerSec * arithmeticIntensity / 1e12;
+    p.baseIntensity = baseIntensity;
+    p.l2ReuseFactor = l2ReuseFactor;
     p.arithmeticIntensity = arithmeticIntensity;
     p.hbmTFLOPS = hbmTFLOPS;
 
@@ -152,11 +224,14 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
     if (hbmTFLOPS < computeTFLOPS) {
         p.bottleneck = Bottleneck::Hbm;
     } else {
-        const double worst = std::min(std::min(smEfficiency, occFactor), waveEfficiency);
-        if (worst >= 0.95)                    p.bottleneck = Bottleneck::TensorCore;
-        else if (worst == waveEfficiency)     p.bottleneck = Bottleneck::Waves;
-        else if (worst == smEfficiency)       p.bottleneck = Bottleneck::Smem;
-        else                                  p.bottleneck = Bottleneck::Occupancy;
+        const double worst =
+            std::min(std::min(smEfficiency, occFactor),
+                     std::min(waveEfficiency, envelopeEfficiency));
+        if (worst >= 0.95)                      p.bottleneck = Bottleneck::TensorCore;
+        else if (worst == waveEfficiency)       p.bottleneck = Bottleneck::Waves;
+        else if (worst == envelopeEfficiency)   p.bottleneck = Bottleneck::Envelope;
+        else if (worst == smEfficiency)         p.bottleneck = Bottleneck::Smem;
+        else                                    p.bottleneck = Bottleneck::Occupancy;
     }
 
     return p;

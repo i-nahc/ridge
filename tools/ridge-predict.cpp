@@ -177,5 +177,11 @@ int main(int argc, char** argv) {
     std::printf("  warps/CTA: %d   CTAs/SM: %d\n", p.numWarps, p.ctasPerSM);
     std::printf("  grid: %.0f CTAs in %.0f slots   waves: %.2f   wave eff: %.3f\n",
                 p.totalCtas, p.ctaSlots, p.wavesExact, p.waveEfficiency);
+    std::printf("  step: %.0f cyc = %.0f mma + %.0f ldmatrix (in series)\n",
+                p.tStepCycles, p.tComputeCycles, p.tSmemCycles);
+    std::printf("  envelope eff: %.3f   %.0f K-steps   prologue %.0f cyc   epilogue %.0f cyc\n",
+                p.envelopeEfficiency, p.kSteps, p.tPrologueCycles, p.tEpilogueCycles);
+    std::printf("  L2 reuse: %.1fx  (base intensity %.1f -> %.1f FLOP/byte)\n",
+                p.l2ReuseFactor, p.baseIntensity, p.arithmeticIntensity);
     return 0;
 }

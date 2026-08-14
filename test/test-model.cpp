@@ -66,7 +66,10 @@ int main() {
         CHECK_NEAR(p.numWarps,             4,      0);
         CHECK_NEAR(p.tComputeCycles,       512.0,  1e-6);
         CHECK_NEAR(p.tSmemCycles,          256.0,  1e-6);   // Finding 8: read traffic, 4 warps x (64+64) x 32 x 2 = 32768 B / 128
-        CHECK_NEAR(p.smEfficiency,         1.00,   1e-9);
+        // Finding 17: ldmatrix is synchronous and the next mma consumes what it
+        // wrote, so these are in series. 512 + 256 = 768, not max(512,256).
+        CHECK_NEAR(p.tStepCycles,          768.0,  1e-6);
+        CHECK_NEAR(p.smEfficiency,         512.0 / 768.0, 1e-9);
         CHECK_NEAR(p.ctasPerSM,            3,      0);
         CHECK_NEAR(p.occFactor,            0.75,   1e-9);
 
@@ -80,14 +83,35 @@ int main() {
         CHECK_NEAR(p.wavesExact,           1024.0 / 324.0, 1e-9);
         CHECK_NEAR(p.waveEfficiency,       1024.0 / 1296.0, 1e-9);
 
-        CHECK_NEAR(p.peakTensorTFLOPS,     311.9,  0.05);
-        // 311.87 x 1.00 x 0.75 x 0.790123 = 184.81, was 233.90 before waves
-        CHECK_NEAR(p.computeTFLOPS,        184.81, 0.05);
-        CHECK_NEAR(p.arithmeticIntensity,  64.0,   1e-9);
-        CHECK_NEAR(p.hbmTFLOPS,            128.0,  0.05);
-        // HBM still binds, so the headline prediction is unchanged at 128.0.
-        CHECK_NEAR(p.predictedTFLOPS,      128.0,  0.05);
-        CHECK(p.bottleneck == Bottleneck::Hbm);
+        // Envelope, hand-derived:
+        //   kSteps    4096/32 = 128
+        //   gmemBpc   2.0e12 / (1.41e9 x 108) = 13.133701 B/cycle
+        //   tileBytes (128x32 + 32x128) x 2 = 16384
+        //   tPrologue (3-1) x 16384 / 13.133701 = 2494.955520
+        //   tEpilogue 128 x 128 x 4 / 13.133701 = 4989.911040
+        //   tBody     128 x 768 = 98304
+        //   envEff    98304 / (2494.955520 + 98304 + 4989.911040) = 0.929247
+        CHECK_NEAR(p.kSteps,               128.0,        1e-9);
+        CHECK_NEAR(p.tPrologueCycles,      2494.955520,  1e-4);
+        CHECK_NEAR(p.tEpilogueCycles,      4989.911040,  1e-4);
+        CHECK_NEAR(p.tBodyCycles,          98304.0,      1e-6);
+        CHECK_NEAR(p.envelopeEfficiency,   0.929247,     1e-6);
+
+        CHECK_NEAR(p.peakTensorTFLOPS,     311.869440, 0.001);
+        // 311.869440 x 0.666667 x 0.75 x 0.790123 x 0.929247 = 114.490382
+        CHECK_NEAR(p.computeTFLOPS,        114.490382, 1e-4);
+
+        // L2 reuse across the wave: sqrt(324) = 18 exactly.
+        CHECK_NEAR(p.baseIntensity,        64.0,   1e-9);
+        CHECK_NEAR(p.l2ReuseFactor,        18.0,   1e-9);
+        CHECK_NEAR(p.arithmeticIntensity,  1152.0, 1e-9);
+        CHECK_NEAR(p.hbmTFLOPS,            2304.0, 1e-6);
+
+        // HBM no longer binds anywhere near this config, which is the point of
+        // the L2 term. The compute side binds and the worst derating factor is
+        // smEfficiency at 0.667, the ldmatrix traffic feeding the tensor cores.
+        CHECK_NEAR(p.predictedTFLOPS,      114.490382, 1e-4);
+        CHECK(p.bottleneck == Bottleneck::Smem);
     }
 
     // Wave quantization: a grid smaller than one wave should be WAVES-bound and
@@ -109,10 +133,11 @@ int main() {
         CHECK_NEAR(p.totalCtas,      16.0,          1e-9);
         CHECK_NEAR(p.ctaSlots,       324.0,         1e-9);
         CHECK_NEAR(p.waveEfficiency, 16.0 / 324.0,  1e-9);
-        // 311.87 x 1.00 x 0.75 x 0.049383 = 11.55, far under the 128.0 HBM
-        // ceiling, so the compute side now binds and the label says why.
-        CHECK_NEAR(p.computeTFLOPS,  11.55,         0.05);
-        CHECK_NEAR(p.predictedTFLOPS, 11.55,        0.05);
+        // 311.869440 x 0.666667 x 0.75 x 0.049383 x 0.929247 = 7.155649.
+        // waveEfficiency at 0.0494 is by far the worst factor, so WAVES is the
+        // label even though smEfficiency and the envelope also derate.
+        CHECK_NEAR(p.computeTFLOPS,   7.155649,     1e-4);
+        CHECK_NEAR(p.predictedTFLOPS, 7.155649,     1e-4);
         CHECK(p.bottleneck == Bottleneck::Waves);
     }
 
@@ -124,9 +149,7 @@ int main() {
     }
 
     // Invariants on a large square GEMM: prediction is the min of the two
-    // ceilings, and the efficiency terms are in [0, 1]. NOTE: v1 does not model
-    // L2 reuse, so this config may report HBM-bound (PLAN.md Known Issue 1). We
-    // check invariants, not a specific bottleneck.
+    // ceilings, and the efficiency terms are in [0, 1].
     {
         GemmConfig cfg;
         cfg.M = cfg.N = cfg.K = 8192;
@@ -136,19 +159,41 @@ int main() {
         CHECK(p.predictedTFLOPS <= p.hbmTFLOPS + 1e-6);
         CHECK(p.smEfficiency > 0.0 && p.smEfficiency <= 1.0 + 1e-9);
         CHECK(p.occFactor > 0.0 && p.occFactor <= 1.0 + 1e-9);
+        CHECK(p.envelopeEfficiency > 0.0 && p.envelopeEfficiency <= 1.0 + 1e-9);
         CHECK(p.ctasPerSM >= 1);
+        // smEfficiency can no longer reach 1.0: a kernel that feeds its tensor
+        // cores from shared memory always pays the ldmatrix time (Finding 17).
+        CHECK(p.smEfficiency < 1.0);
     }
 
     // Tile-size sanity: a larger CTA tile reuses each loaded operand more, so it
-    // has higher arithmetic intensity and a higher HBM ceiling. NOTE: in v1 the
-    // per-CTA roofline makes intensity depend only on tile size, not K, because
-    // L2 reuse is not modeled yet (PLAN.md Known Issue 1). So this compares tile
-    // sizes, not K values.
+    // has higher intensity before any L2 effect. This checks baseIntensity
+    // rather than arithmeticIntensity on purpose, because the L2 factor depends
+    // on ctaSlots and a bigger tile fits fewer CTAs per SM, so the effective
+    // intensity confounds two things. The tile-shape claim is about the base.
     {
         GemmConfig big;   big.BM = 256; big.BN = 256; big.warpM = 64; big.warpN = 64;
         GemmConfig small; small.BM = 64; small.BN = 64; small.warpM = 64; small.warpN = 64;
-        CHECK(predict(big, hw).arithmeticIntensity >
-              predict(small, hw).arithmeticIntensity);
+        CHECK(predict(big, hw).baseIntensity >
+              predict(small, hw).baseIntensity);
+    }
+
+    // Envelope sanity: shrinking K at a fixed tile leaves less steady state to
+    // amortise pipeline fill and accumulator drain over, so the envelope must
+    // derate harder and eventually become the binding factor. This is the term
+    // that fixed the short-K blowup in PLAN.md Finding 17.
+    {
+        GemmConfig deep;
+        deep.M = deep.N = 4096; deep.K = 4096;
+        deep.BM = 128; deep.BN = 128; deep.BK = 32;
+        deep.warpM = 64; deep.warpN = 64; deep.stages = 3; deep.regsPerThread = 128;
+        GemmConfig shallow = deep;
+        shallow.K = 128;
+        const Prediction pd = predict(deep, hw);
+        const Prediction ps = predict(shallow, hw);
+        CHECK(ps.envelopeEfficiency < pd.envelopeEfficiency);
+        CHECK(ps.kSteps < pd.kSteps);
+        CHECK(ps.bottleneck == Bottleneck::Envelope);
     }
 
     // Does-not-fit sanity: an absurd tile should not fit an SM.
