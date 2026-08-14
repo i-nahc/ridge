@@ -125,8 +125,10 @@ template <int Warps>
 __global__ __launch_bounds__(Warps * 32) void ldsControlKernel(
     int iters, uint32_t* sink, long long* cycleOut) {
 
-    __shared__ float4 smem[kSmemHalves / 8];
-    constexpr int kVecs = kSmemHalves / 8;
+    // Power of two so the address can be rotated per iteration with a single
+    // AND rather than a modulo.
+    constexpr int kVecs = 1024;
+    __shared__ float4 smem[kVecs];
     for (int i = int(threadIdx.x); i < kVecs; i += Warps * 32) {
         smem[i] = make_float4(float(i), float(i) + 1, float(i) + 2, float(i) + 3);
     }
@@ -136,7 +138,7 @@ __global__ __launch_bounds__(Warps * 32) void ldsControlKernel(
     // pattern and therefore the best case this path can achieve.
     int idx[kIlp];
 #pragma unroll
-    for (int j = 0; j < kIlp; ++j) idx[j] = (int(threadIdx.x) + j * 32) % kVecs;
+    for (int j = 0; j < kIlp; ++j) idx[j] = (int(threadIdx.x) + j * 32) & (kVecs - 1);
 
     float acc = 0.0f;
     __syncthreads();
@@ -145,7 +147,18 @@ __global__ __launch_bounds__(Warps * 32) void ldsControlKernel(
     for (int i = 0; i < iters; ++i) {
 #pragma unroll
         for (int j = 0; j < kIlp; ++j) {
-            const float4 v = smem[idx[j]];
+            // The address must depend on the loop counter. Without that, these
+            // are loop-invariant loads from an array the loop never writes, so
+            // the compiler hoists all eight out of the loop and what remains is
+            // 2000 iterations of floating point adds.
+            //
+            // That is exactly what the first version did, and it reported 1007
+            // B/cycle/SM, about 7.9 times the bank capacity. Note that the
+            // ldmatrix path above was never vulnerable to this, because asm
+            // volatile cannot be hoisted out of a loop. The control was the
+            // broken one, which is a reminder that a cross-check needs checking
+            // too.
+            const float4 v = smem[(idx[j] + i) & (kVecs - 1)];
             acc += v.x + v.y + v.z + v.w;
         }
     }
