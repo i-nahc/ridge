@@ -37,7 +37,24 @@ Prediction predict(const GemmConfig& cfgIn, const HardwareModel& hw) {
     const double mmasPerCtaPerStep = mmasPerWarpPerStep * numWarps;
     const double tCompute = mmasPerCtaPerStep * hw.mmaCyclesPerInst;
 
-    const double smemBytesPerStep = double(cfg.BM * cfg.BK + cfg.BK * cfg.BN) * db;
+    // Shared memory READ traffic, not write traffic (PLAN.md Finding 8).
+    //
+    // The stage that competes for shared-memory bandwidth is what ldmatrix pulls
+    // *out* to feed the tensor cores, not what cp.async writes *in*. Those are
+    // different quantities and the second is smaller.
+    //
+    // Per warp per K-step, from the instruction shapes:
+    //   A: (warpM/16) x (BK/16) ldmatrix.x4 at 512 B  = warpM * BK * dtypeBytes
+    //   B: (warpN/8)  x (BK/16) ldmatrix.x2 at 256 B  = warpN * BK * dtypeBytes
+    // so per CTA it is numWarps * (warpM + warpN) * BK * dtypeBytes.
+    //
+    // The old form was (BM*BK + BK*BN) * dtypeBytes, which does not mention the
+    // warp tile at all. That was why the model gave identical smem behaviour to
+    // configs that measure very differently: at 128x128x32 the read traffic is
+    // 32768 B for a 64x64 warp tile and 65536 B for 32x32, while the old formula
+    // returned 16384 B for both.
+    const double smemBytesPerStep =
+        double(numWarps) * (cfg.warpM + cfg.warpN) * cfg.BK * db;
     const double tSmem = smemBytesPerStep / hw.smemBytesPerCycle;
 
     const double tStep = std::max(tCompute, tSmem);

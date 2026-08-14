@@ -65,7 +65,7 @@ int main() {
 
         CHECK_NEAR(p.numWarps,             4,      0);
         CHECK_NEAR(p.tComputeCycles,       512.0,  1e-6);
-        CHECK_NEAR(p.tSmemCycles,          128.0,  1e-6);
+        CHECK_NEAR(p.tSmemCycles,          256.0,  1e-6);   // Finding 8: read traffic, 4 warps x (64+64) x 32 x 2 = 32768 B / 128
         CHECK_NEAR(p.smEfficiency,         1.00,   1e-9);
         CHECK_NEAR(p.ctasPerSM,            3,      0);
         CHECK_NEAR(p.occFactor,            0.75,   1e-9);
