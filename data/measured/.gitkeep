@@ -1,0 +1,3 @@
+# git does not track empty directories. measure.cu writes a100.csv here and
+# now creates this directory itself, but keeping the placeholder means a fresh
+# clone has it before anything runs.
