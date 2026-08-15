@@ -5,8 +5,8 @@
 
 namespace ridge {
 
-// Predict sustained throughput and the bottleneck for one GEMM config on one
-// GPU. Implements SPEC section 4 (the multi-stage roofline). No GPU needed.
+// Predict sustained throughput and the binding resource for one GEMM config on
+// one GPU. Closed form, no GPU needed.
 Prediction predict(const GemmConfig& cfg, const HardwareModel& hw);
 
 } // namespace ridge

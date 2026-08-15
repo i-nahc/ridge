@@ -32,3 +32,6 @@ Thumbs.db
 # Python tooling
 __pycache__/
 *.pyc
+
+# Local working docs, not shipped
+docs/

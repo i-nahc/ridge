@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Runs the twelve pre-registered Nsight Compute profiles for the Phase 4
-# bottleneck-label check. The configs, the counters, the counter-to-label
-# decision table and the 9-of-12 pass criterion are all fixed in advance in
-# data/sweep/ncu-label-mapping.md. This script only collects the counters. It
+# Runs the twelve pre-registered Nsight Compute profiles for the bottleneck-label
+# check. The configs, the counters, the counter-to-label decision table and the
+# pass criterion are all fixed in advance in data/sweep/ncu-label-mapping.md. This script only collects the counters. It
 # does not decide anything, and it must not grow a scoring step, because the
 # scoring rule is the part that has to stay untouched after the data exists.
 #
@@ -32,7 +31,7 @@ sm__cycles_active.avg.pct_of_peak_sustained_elapsed
 
 # predicted_label | tag | M N K | BM BN BK WM WN stages groupM
 # Order and membership come from ncu-label-mapping.md section 3. Do not edit
-# this list to improve the result, that is PLAN.md anti-pattern 8.
+# this list to improve the result.
 CONFIGS=(
   "SMEM|canonical|4096 4096 4096|64 64 64 32 32 4 8"
   "SMEM|many-waves|8192 8192 8192|64 64 64 32 32 4 8"
@@ -90,8 +89,7 @@ for c in "${CONFIGS[@]}"; do
     # kernel replay snapshots and restores device memory so it can re-run the
     # same launch, which trips over cp.async traffic still in flight and kills
     # the process with an illegal memory access. Application replay re-runs the
-    # whole process per pass instead. The kernel is fine. Diagnosed 2026-08-14
-    # by switching modes and watching the crash disappear.
+    # whole process per pass instead. The kernel itself is fine.
     #
     # -c 1 is global to the run, so with the regex pinned to one instantiation
     # it captures the first launch of exactly the variant we want.
@@ -99,7 +97,7 @@ for c in "${CONFIGS[@]}"; do
     # locking clocks to base for reproducibility, which overrides the 1410 MHz
     # lock setup-box.sh applies and makes measure's cuBLAS canary drift about
     # 12% across the run. measure then correctly refuses the data. We pin clocks
-    # ourselves (PLAN.md Finding 9), so the profiler must leave them alone.
+    # ourselves, so the profiler must leave them alone.
     sudo "$(command -v ncu)" --csv --replay-mode application --clock-control none \
         --metrics "$METRICS" \
         --kernel-name-base mangled \
@@ -107,9 +105,8 @@ for c in "${CONFIGS[@]}"; do
         "$BUILD/measure" "$WORK/shape.csv" "$WORK/throwaway.csv" \
         > "$WORK/raw.txt" 2>&1
 
-    # Keep the raw output for every config, not only the ones that look wrong.
-    # First time round, the runs that appeared to succeed were the ones that had
-    # silently captured nothing, and their logs had already been deleted.
+    # Keep the raw output for every config, not only the ones that look wrong. A run
+    # that captures nothing still looks like it succeeded from the exit code.
     cp "$WORK/raw.txt" "$OUT.$i.log"
 
     # ncu --csv rows end with Metric Name, Metric Unit, Metric Value. Matching
@@ -133,5 +130,4 @@ done
 
 echo
 echo "wrote $OUT"
-echo "Scoring uses the decision table in data/sweep/ncu-label-mapping.md section 2,"
-echo "which was registered before this run."
+echo "score with the decision table in data/sweep/ncu-label-mapping.md, registered before this run"

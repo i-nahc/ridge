@@ -14,7 +14,7 @@
 //
 // Read-only rather than copy. The model's HBM term counts operand traffic into
 // shared memory, which is a read stream. A copy benchmark would report a
-// read+write figure that does not correspond to anything in docs/MODEL.md
+// read+write figure that does not correspond to anything the model uses
 // section 5.
 
 #include "cal-common.cuh"

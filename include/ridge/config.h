@@ -13,9 +13,8 @@ inline int dtypeBytes(DType d) {
     return 2;
 }
 
-// One tensor-core GEMM tile configuration. This is the flat v1 input. Phase 6
-// refactors it into a general TilePlan (see SPEC section 3.5). Fields that are
-// 0 for the MMA shape are filled from Mma.h at predict time.
+// One tensor-core GEMM tile configuration. MMA shape fields left at 0 are filled
+// in from mma.h at predict time.
 struct GemmConfig {
     // Problem size.
     int64_t M = 4096, N = 4096, K = 4096;

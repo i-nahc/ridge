@@ -5,8 +5,7 @@
 // table of concrete launchers so measure.cu can walk the sweep without knowing
 // anything about templates, and so ptxas reports register and shared memory
 // usage per config when this file is compiled with -Xptxas -v. Those two numbers
-// feed straight back into the model as regsPerThread and smemBytesPerCta, see
-// SPEC section 5.
+// feed straight back into the model as regsPerThread and smemBytesPerCta.
 
 #include "gemm-mma.cuh"
 
@@ -45,7 +44,7 @@ static cudaError_t launchVariant(const half* A, const half* B, float* C,
 
 // The sweep. These span the tile shapes the model should be able to tell apart,
 // including configs that should be shared memory bound and configs that should
-// run out of occupancy, so Phase 4 has something to explain.
+// run out of occupancy.
 #define RIDGE_VARIANT(BM, BN, BK, WM, WN, S, G, REGS)                          \
     KernelVariant{BM, BN, BK, WM, WN, S, G,                                    \
                   smemBytesForConfig<BM, BN, BK, S>(),                         \
@@ -54,7 +53,7 @@ static cudaError_t launchVariant(const half* A, const half* B, float* C,
                   &launchVariant<BM, BN, BK, WM, WN, S, G>}
 
 static const KernelVariant kVariants[] = {
-    // The default config from docs/MODEL.md section 9, so the worked example is
+    // The default config from the worked example in test-model.cpp, so it is
     // measurable directly.
     RIDGE_VARIANT(128, 128, 32, 64, 64, 3, 8, 224),
     RIDGE_VARIANT(128, 128, 32, 64, 64, 4, 8, 225),

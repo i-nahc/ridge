@@ -1,12 +1,10 @@
 // cal-common.cuh holds what every calibration microbenchmark needs.
 //
-// It exists mainly so the warmup cannot be forgotten. PLAN.md Finding 9 records
-// that an idle A100 sits at 210 MHz against a 1410 MHz boost clock, that
-// whatever is timed first in a process gets measured during the ramp, and that
-// the resulting error was about 20%. A calibration constant measured cold is
-// wrong by roughly that much, gets written into data/hardware/a100.json, and
-// then nothing downstream questions it. The Phase 3 sanity bands are wide enough
-// that a 20% error on HBM bandwidth would pass.
+// It exists mainly so the warmup cannot be forgotten. An idle A100 sits at 210 MHz
+// against a 1410 MHz boost clock, so whatever is timed first in a process is
+// measured during the ramp, worth about 20%. A constant measured cold is wrong by
+// roughly that much, gets written into the json, and nothing downstream questions
+// it. The sanity bands are wide enough that a 20% HBM error would pass.
 //
 // So: every cal-*.cu warms the GPU through warmUpGpu before its first timed
 // region, and every one of them refuses to run if the SM clock is not pinned.
@@ -49,7 +47,7 @@ __global__ void burnKernel(float* sink, int iters) {
 }
 
 // Drives the GPU to steady clock and thermal state. Not optional, see the file
-// header and PLAN.md Finding 9.
+// header.
 inline void warmUpGpu(double seconds = kWarmupSeconds) {
     int device = 0;
     CAL_CUDA_CHECK(cudaGetDevice(&device));
@@ -67,11 +65,9 @@ inline void warmUpGpu(double seconds = kWarmupSeconds) {
 
 // Reports the device and refuses to proceed if the clock is not pinned.
 //
-// An unpinned clock does not merely add noise. The calibrated constants are
-// meant to describe one machine state, and Phase 4 validates the model against
-// measurements taken in that same state. If the clock floats, the constants and
-// the validation sweep describe different machines and the comparison is
-// meaningless.
+// An unpinned clock does not merely add noise. The constants are meant to describe
+// one machine state, and the validation sweep is taken in that same state. If the
+// clock floats they describe different machines and the comparison is meaningless.
 inline cudaDeviceProp requireLockedClocks() {
     int device = 0;
     CAL_CUDA_CHECK(cudaGetDevice(&device));
@@ -84,11 +80,8 @@ inline cudaDeviceProp requireLockedClocks() {
         std::printf("WARNING: these microbenchmarks target sm_80. Constants "
                     "measured elsewhere do not belong in a100.json.\n");
     }
-    std::printf("NOTE: clocks must be pinned with `sudo nvidia-smi -lgc 1410,1410` "
-                "before calibrating.\n"
-                "      This tool cannot verify that from inside the process, so it "
-                "is on the operator.\n"
-                "      See PLAN.md Finding 9 for why it matters.\n");
+    std::printf("clocks must be pinned with `sudo nvidia-smi -lgc 1410,1410` before\n"
+                "calibrating, and this cannot be verified from inside the process\n");
     return prop;
 }
 

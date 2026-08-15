@@ -1,7 +1,7 @@
 // cal-latency.cu measures warpsNeededToHide: how many active warps per SM are
 // required before throughput stops improving.
 //
-// This is the constant behind the occupancy term in docs/MODEL.md section 4:
+// This is the constant behind the occupancy term:
 //   occFactor = min(1.0, activeWarps / warpsNeededToHide)
 //
 // WHY THIS IS NOT JUST cal-mma's SATURATION POINT. cal-mma sweeps warps on a
@@ -12,8 +12,8 @@
 // chain, not from the arithmetic alone.
 //
 // So the workload here is the kernel's actual inner loop shape: ldmatrix pulling
-// operands out of shared memory, immediately consumed by mma. The knee of that
-// curve is the number the model wants.
+// operands out of shared memory, immediately consumed by mma. The point where
+// that curve flattens is the number the model wants.
 //
 // The result is deliberately reported as a curve and not only as a single
 // number. "Where does it saturate" has a soft answer, the model treats it as
@@ -34,11 +34,11 @@ constexpr int kRows = 128;
 constexpr int kSmemHalves = kRows * kPaddedRow;
 
 // The ILP the reported constant is taken from. This used to be the only ILP
-// measured, and that was the problem: the knee it found (4 warps on A100) is a
-// knee *at two chains per warp*, and the model then applied it to kernels whose
-// dependency structure is nothing like that. Configs at exactly 4 active warps
+// measured, and that was the problem: the saturation point it found, 4 warps on
+// A100, is the saturation point *at two chains per warp*, and the model then
+// applied it to kernels whose dependency structure is nothing like that. Configs at exactly 4 active warps
 // over-predict by about 39% as a result, which is the single largest error in
-// the model. See PLAN.md Findings 17 and 19.
+// the model.
 //
 // The sweep below now measures the whole warps x ILP surface so the ILP
 // dependence is visible rather than assumed. This constant only selects which
@@ -148,10 +148,10 @@ int main() {
 
     ridgecal::warmUpGpu();
 
-    // Sweep the whole warps x ILP surface. The knee is not a property of the
-    // hardware alone, it is a property of the hardware plus how much independent
-    // work each warp carries, and collapsing that to one number is what produced
-    // the model's largest error.
+    // Sweep the whole warps x ILP surface. Where throughput saturates is not a
+    // property of the hardware alone, it also depends on how much independent work
+    // each warp carries, and collapsing that to one number produced the model's
+    // largest error.
     std::printf("\nldmatrix -> mma dependency chain\n");
     std::printf("mma/cycle/SM, and %% of the best at that ILP\n\n");
     std::printf("  %5s", "warps");
@@ -200,20 +200,20 @@ int main() {
         std::printf("\n");
     }
 
-    // The knee per ILP column. If these differ, warpsNeededToHide is not a
+    // Saturation point per ILP column. If these differ, warpsNeededToHide is not a
     // hardware constant and the model must not treat it as one.
-    std::printf("\n  knee (first warp count within %.0f%% of best) per ILP:\n",
+    std::printf("\n  saturation (first warp count within %.0f%% of best) per ILP:\n",
                 kSaturationFraction * 100.0);
     for (int c = 0; c < kNumIlpCols; ++c) {
-        int knee = kWarpRow[kNumWarpRows - 1];
+        int saturated = kWarpRow[kNumWarpRows - 1];
         for (int w = 0; w < kNumWarpRows; ++w) {
             if (surface[c][w] >= kSaturationFraction * bestPerIlp[c]) {
-                knee = kWarpRow[w];
+                saturated = kWarpRow[w];
                 break;
             }
         }
-        std::printf("    ILP=%d  knee %2d warps/SM\n", kIlpCol[c], knee);
-        std::printf("CAL_KNEE ilp %d warps %d\n", kIlpCol[c], knee);
+        std::printf("    ILP=%d  saturates at %2d warps/SM\n", kIlpCol[c], saturated);
+        std::printf("CAL_SATURATION ilp %d warps %d\n", kIlpCol[c], saturated);
     }
     for (int c = 0; c < kNumIlpCols; ++c)
         for (int w = 0; w < kNumWarpRows; ++w)
@@ -232,8 +232,8 @@ int main() {
 
     std::printf("\n  reported constant is the ILP=%d column\n", kIlp);
 
-    // The knee: the smallest warp count reaching kSaturationFraction of the best
-    // observed throughput.
+    // The smallest warp count reaching kSaturationFraction of the best observed
+    // throughput.
     int needed = warpCounts.back();
     for (size_t i = 0; i < warpCounts.size(); ++i) {
         if (throughputs[i] >= kSaturationFraction * best) {
@@ -246,10 +246,9 @@ int main() {
                 kSaturationFraction * 100.0, needed);
     ridgecal::reportConstant("warpsNeededToHide", double(needed), "warps/SM",
                              bestRepeats);
-    std::printf("\n  This is a knee on a smooth curve, not a hard threshold. The\n"
-                "  model treats it as one, which is a simplification worth\n"
-                "  remembering when a config lands near the boundary. Read the\n"
-                "  curve above before trusting the single number.\n");
+    std::printf("\n  the curve above is smooth, so this is a threshold the model\n"
+                "  imposes rather than one the hardware has. Read the curve before\n"
+                "  trusting the single number.\n");
 
     std::printf("\nCAL_RESULT warpsNeededToHide %d\n", needed);
     for (size_t i = 0; i < warpCounts.size(); ++i) {

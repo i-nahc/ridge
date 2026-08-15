@@ -1,7 +1,7 @@
 // cal-mma.cu measures mmaCyclesPerInst: the SM-level cycle cost of one
 // mma.sync.m16n8k16, folding in all tensor cores and warp schedulers.
 //
-// This is the constant behind peakTensorTFLOPS in docs/MODEL.md section 5:
+// This is the constant behind peakTensorTFLOPS:
 //   peakTensorTFLOPS = (mmaFlops / mmaCyclesPerInst) * clockHz * numSMs / 1e12
 //
 // THE METHODOLOGICAL TRAP: throughput is not latency. An mma has a result

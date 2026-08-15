@@ -12,12 +12,10 @@
 // reason. Bank behaviour is a property of the layout, not just the instruction,
 // and the padded layout is what the kernel runs.
 //
-// EXPECT THIS TO COME IN WELL BELOW 128 B/cycle. The placeholder in the model is
-// 32 banks x 4 bytes = 128, which is a bank capacity rather than an achievable
-// load/store-unit rate. PLAN.md Finding 7 predicts the measured value lands
-// materially lower, and that this is expected physics rather than a broken
-// microbenchmark. Do not "fix" a low reading by importing a number from another
-// GPU, which is the error anti-pattern 7 warns about.
+// Expect this well below 128 B/cycle. The 32 banks x 4 bytes figure is a bank
+// capacity rather than an achievable load/store-unit rate, so a materially lower
+// reading is expected physics rather than a broken benchmark. Do not "fix" a low
+// reading by importing a number from another GPU.
 
 #include "../kernels/gemm-mma.cuh"
 #include "cal-common.cuh"
@@ -277,14 +275,12 @@ int main() {
         physical = false;
     }
     if (ldsBest > kTheoretical) {
-        std::printf("\n  FAIL: the LDS control also exceeds theoretical (%.1f B/cycle).\n"
-                    "  The harness itself is wrong, so neither number here means "
-                    "anything.\n", ldsBest);
+        std::printf("\n  the LDS control also exceeds theoretical (%.1f B/cycle), so the\n"
+                    "  harness itself is wrong and neither number here means anything\n", ldsBest);
         physical = false;
     }
     if (physical) {
-        std::printf("\n  A value well below 128 is the expected outcome, see PLAN.md "
-                    "Finding 7.\n");
+        std::printf("\n  a value well below 128 is the expected outcome\n");
     }
 
     std::printf("\nCAL_RESULT smemBytesPerCycle %.6f\n", best);

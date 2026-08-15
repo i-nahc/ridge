@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
-"""Phase 4 gate check: does the model predict, and does it rank?
+"""Joins the measured sweep with model predictions and reports accuracy and
+ranking separately, because a model can be good at one and bad at the other.
 
-Joins the measured sweep with model predictions and reports two different things,
-because they are different and a model can pass one while failing the other.
+Absolute accuracy is mean absolute percentage error with the full distribution,
+not just the mean. Ranking quality is what an autotuner actually consumes: a
+uniform 40% under-prediction ranks perfectly, while an 8% error that varies by
+config can rank badly.
 
-ABSOLUTE ACCURACY is what the project promised: mean absolute percentage error
-with the full distribution, not just the mean.
-
-RANKING QUALITY is what the model is actually for. An autotuner does not consume
-TFLOP/s, it consumes an ordering. A uniform 40% under-prediction ranks perfectly.
-An 8% error that varies by config can rank badly. See the Phase 4 gate in
-PLAN.md.
-
-TIES ARE REPORTED AS RANGES, NOT COLLAPSED. PLAN.md Finding 11 records that the
-current model predicts only four distinct values per shape, with a fourteen-way
-tie among the 128x128 configs. When the top prediction is a tie, "the model's top
-pick" is not a single config, and reporting one number for recall or regret would
-be inventing a decision the model did not make. So every ranking metric that can
-be affected by ties is reported as [pessimistic, optimistic]: what an autotuner
-would get if it broke ties in the worst possible order, and in the best. A wide
-range is itself the finding.
+Ties are reported as ranges rather than collapsed. When several configs share a
+predicted value, "the model's top pick" is not a single config, and reporting one
+number for recall or regret would invent a decision the model did not make. So
+every affected metric is given as [pessimistic, optimistic]: what an autotuner
+would get breaking ties in the worst order, and in the best.
 
 Predictions come from `ridge-predict --batch`, never from a Python
-reimplementation of the model. A second copy of the math would drift silently and
-the first symptom would be a validation result describing a model nobody ships.
+reimplementation. A second copy of the math would drift silently.
 
-No third-party dependencies. The statistics are short enough to write out, and a
-gate that fails because numpy is missing is a bad gate.
+No third-party dependencies. The statistics are short enough to write out.
 """
 
 import argparse
@@ -147,7 +137,7 @@ def check_sweep_matches_registration(rows, registered, variants):
     """The measured set must be exactly the registered cross product.
 
     A sweep that quietly lost its inconvenient configs would otherwise produce a
-    better error number and pass. See PLAN.md anti-pattern 8.
+    better error number and pass.
     """
     expected = set()
     for M, N, K in registered:
@@ -216,7 +206,7 @@ def main():
     variants = load_variants(args.variants)
 
     print("=" * 74)
-    print("Ridge Phase 4 validation")
+    print("Ridge model validation")
     print("=" * 74)
     for k in ("gpu", "sms", "nominal_clock_mhz", "warmup_seconds",
               "canary_drift_fraction"):
@@ -253,10 +243,7 @@ def main():
         for m in sorted(missing)[:5]:
             print(f"    {m}")
         print(f"  EXTRA in measured:     {len(extra)}")
-        failures.append(
-            "measured set does not match the registered sweep. A narrowed sweep "
-            "produces a better number and is exactly what anti-pattern 8 forbids."
-        )
+        failures.append("measured set does not match the registered sweep")
     else:
         print("  matches the registered sweep exactly")
     print()
@@ -290,12 +277,9 @@ def main():
     print()
 
     if mape > args.fail_mape:
-        failures.append(
-            f"MAPE {mape:.1f}% is above the {args.fail_mape:.0f}% ceiling. The "
-            f"model is wrong, iterate rather than ship."
-        )
+        failures.append(f"MAPE {mape:.1f}% is above the {args.fail_mape:.0f}% ceiling")
     elif mape > args.max_mape:
-        failures.append(f"MAPE {mape:.1f}% exceeds the {args.max_mape:.0f}% gate.")
+        failures.append(f"MAPE {mape:.1f}% exceeds the {args.max_mape:.0f}% target")
 
     # --- ranking, per shape ----------------------------------------------
     by_shape = collections.OrderedDict()
@@ -343,9 +327,8 @@ def main():
     print()
 
     if max(tie_sizes) > 1:
-        print("  NOTE: the model predicts identical values for groups of configs, so")
-        print("  'the model's top pick' is not a single config. Ranking figures are")
-        print("  ranges over how a tie could break. See PLAN.md Finding 11.")
+        print("  groups of configs share a predicted value, so ranking figures are")
+        print("  ranges over how a tie could break")
         print()
 
     # --- bottleneck labels ------------------------------------------------
@@ -353,40 +336,26 @@ def main():
     print("bottleneck attribution")
     print(f"  predicted label distribution: {dict(labels)}")
     if len(labels) == 1:
-        print("  NOTE: every config received the same label, so the attribution")
-        print("  carries no information on this sweep.")
+        print("  every config received the same label, so the attribution carries no")
+        print("  information on this sweep")
     if args.ncu:
         print(f"  ncu export: {args.ncu}")
-        print("  (comparison not implemented yet, see below)")
+        print("  comparison not implemented here")
         failures.append("ncu comparison requested but not implemented")
     else:
-        print("  NOT VALIDATED. The Phase 4 gate requires bottleneck-label accuracy")
-        print("  cross-checked against Nsight Compute on at least 10 configs, using")
-        print("  the mapping pre-registered in data/sweep/ncu-label-mapping.md.")
-        failures.append(
-            "bottleneck-label accuracy not validated against ncu. The gate cannot "
-            "pass without it. Run ncu and pass --ncu."
-        )
+        print("  not cross-checked against Nsight Compute, run bench/run-ncu-validation.sh")
+        failures.append("bottleneck labels not validated against ncu")
     print()
 
     # --- verdict -----------------------------------------------------------
     print("=" * 74)
+    mean_rho = (sum(valid_rho) / len(valid_rho)) if valid_rho else float("nan")
+    print(f"MAPE {mape:.2f}%, mean Spearman {mean_rho:.3f}, worst regret@1 {max(worst_regrets)*100:.2f}%")
     if failures:
-        print("PHASE 4 GATE: FAIL")
-        for f in failures:
-            print(f"  - {f}")
         print()
-        print("Report the honest number. A well-explained 18% beats a gamed 10%,")
-        print("and narrowing the sweep to reach a threshold is anti-pattern 8.")
+        for f in failures:
+            print(f"  {f}")
         return 1
-    print("PHASE 4 GATE: PASS")
-    print(f"  MAPE {mape:.2f}%, mean Spearman "
-          f"{(sum(valid_rho)/len(valid_rho)) if valid_rho else float('nan'):.3f}, "
-          f"worst regret@1 {max(worst_regrets)*100:.2f}%")
-    print()
-    print("Next: human-review checkpoint 3 in PLAN.md. The 2 to 3 case studies")
-    print("explaining a surprising measured result are deliberately not part of")
-    print("this machine gate, because judging what is surprising is human work.")
     return 0
 
 

@@ -3,9 +3,9 @@
 
 namespace ridge {
 
-// Per-GPU hardware model. Constants marked [CAL] in the spec should be replaced
-// by microbenchmark calibration (Phase 3). The built-in factory below holds
-// datasheet-derived placeholders so Phase 1 runs with no GPU.
+// Per-GPU hardware model. Constants marked [CAL] come from the microbenchmarks in
+// bench/calibrate/. The built-in factory below holds datasheet placeholders so the
+// model runs with no GPU present.
 struct HardwareModel {
     std::string name;
     int numSMs = 0;
@@ -30,12 +30,9 @@ struct HardwareModel {
     // [CAL] active warps per SM needed to hide MMA and memory latency.
     double warpsNeededToHide = 0.0;
 
-    // Built-in placeholder model. Phase 3 replaces this by loading a calibrated
-    // data/hardware/*.json.
-    //
-    // WARNING: hbmBytesPerSec here is the A100 80GB figure while the project
-    // measures on a 40GB card, so this model currently describes hardware that
-    // is not under test. See PLAN.md Finding 10. Prefer loadFromJson.
+    // Placeholder model. hbmBytesPerSec here is the A100 80GB figure while the
+    // measurements come from a 40GB card, so this describes hardware that is not
+    // under test. Prefer loadFromJson.
     static HardwareModel a100();
 
     // Loads a calibrated model from a data/hardware/*.json written by

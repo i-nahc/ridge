@@ -11,9 +11,8 @@
 #   1. A MIG-partitioned GPU. The model hardcodes numSMs=108. A MIG slice gives
 #      a fraction of that, and every prediction would be wrong with no error.
 #   2. Unlocked SM clocks. An idle A100 sits at 210 MHz against a 1410 MHz boost
-#      clock, and clock locks do not survive a reboot or a new instance. See
-#      PLAN.md Finding 9: this artifact was worth about 20% and it corrupted
-#      every throughput measurement in the project before it was found.
+#      clock, locks do not survive a reboot or a new instance, and whatever is
+#      timed first during the ramp reads about 20% slow.
 #
 # Usage:  bash setup-box.sh
 
@@ -60,8 +59,8 @@ if sudo nvidia-smi -lgc 1410,1410 >/dev/null 2>&1; then
 else
     fail "could not lock clocks (sudo nvidia-smi -lgc 1410,1410).
   Without a lock the SM clock floats between 210 and 1410 MHz and whatever is
-  timed first is measured during the ramp. See PLAN.md Finding 9. If this box
-  does not grant the permission, it is not usable for Phase 3 to 5."
+  timed first is measured during the ramp. If this box does not grant the
+  permission it is not usable for measurement."
 fi
 
 # ---------------------------------------------------------------------------
@@ -78,12 +77,12 @@ g++ -std=c++17 -O2 -Iinclude \
     -o "$BUILD/ridge-predict"
 printf 'ok\n'
 
-printf '  check-gemm (Phase 2 gate)... '
+printf "  check-gemm... "
 nvcc -arch=$ARCH -O3 -std=c++17 -Ibench \
      bench/kernels/gemm-mma.cu bench/check-gemm.cu -lcublas -o "$BUILD/check-gemm"
 printf 'ok\n'
 
-printf '  measure (Phase 4 sweep)... '
+printf "  measure... "
 nvcc -arch=$ARCH -O3 -std=c++17 -Ibench \
      bench/kernels/gemm-mma.cu bench/measure.cu -lcublas -o "$BUILD/measure"
 printf 'ok\n'
@@ -100,44 +99,32 @@ SPILLS=$(nvcc -arch=$ARCH -O3 -std=c++17 -Ibench -Xptxas -v \
          -c bench/kernels/gemm-mma.cu -o /dev/null 2>&1 \
          | grep -c 'spill stores, [1-9]' || true)
 if [ "$SPILLS" != "0" ]; then
-    fail "$SPILLS kernel variants spill registers. Phase 2 criterion 2 fails."
+    fail "$SPILLS kernel variants spill registers"
 fi
 printf 'none\n'
 
 # ---------------------------------------------------------------------------
 say "4. Calibrate this card"
 # ---------------------------------------------------------------------------
-# Calibration is run every session, on every box, deliberately.
-#
-# SPEC section 9 requires calibrating and validating on the same physical card.
-# Carrying a json forward from a previous box breaks that: the constants would
-# describe one piece of silicon and the sweep another, and nothing downstream
-# would flag it. Recalibrating costs about two minutes against a sweep that costs
-# five, so the efficiency argument for reusing an old file is worth very little
-# and the correctness argument against it is absolute.
-#
-# It also removes a whole failure class. A stale json is invisible once written,
-# and "which box did these constants come from" is not a question anyone will
-# think to ask three weeks later.
-#
-# Running it here rather than leaving it as a step means it cannot be forgotten
-# on the fourth box of the day, which is exactly when it would be.
+# Calibration runs every session on every box, deliberately. Constants and sweep
+# have to come from the same physical card, and carrying a json forward would have
+# them describe different silicon with nothing downstream to flag it.
+# Recalibrating costs about two minutes against a five minute sweep.
 if [ -f data/hardware/a100-sxm4-40gb.json ]; then
     printf '  a previous json exists and will be overwritten by this run\n'
 fi
 
 python3 bench/calibrate/run-calibration.py || fail "calibration failed.
   A constant outside its sanity band means the microbenchmark is wrong, not that
-  the hardware is surprising. Do not widen the band. See PLAN.md anti-patterns
-  7 and 8."
+  the hardware is surprising. Do not widen the band."
 
 # ---------------------------------------------------------------------------
 say "Ready"
 # ---------------------------------------------------------------------------
 cat <<'EOF'
-  ./build/check-gemm          Phase 2 gate
-  ./build/measure             Phase 4 sweep, 4-8 min, use tmux
-  python3 bench/validate.py   Phase 4 gate
+  ./build/check-gemm          correctness and throughput vs cuBLAS
+  ./build/measure             the measurement sweep, 4-8 min, use tmux
+  python3 bench/validate.py   model accuracy and ranking
 
   GETTING RESULTS OFF THIS BOX
 

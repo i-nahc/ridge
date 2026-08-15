@@ -8,18 +8,14 @@
 
 namespace ridge {
 
-// Datasheet-derived placeholders for A100. Phase 3 calibration replaces these
-// with measured values. mmaCyclesPerInst is back-solved so peak FP16 tensor
+// Datasheet-derived placeholders for A100, replaced by calibration. mmaCyclesPerInst is back-solved so peak FP16 tensor
 // throughput is ~312 TFLOPS dense:
 //   4096 flops/mma / 2.0 cycles * 1.41e9 Hz * 108 SMs ~= 312e12 FLOP/s.
 //
-// KNOWN WRONG FOR THE CARD UNDER TEST: hbmBytesPerSec below is the A100 80GB
-// figure of about 2.0 TB/s, while every measurement in this project comes from
-// an A100-SXM4-40GB, which is about 1.555 TB/s. That makes the HBM roofline
-// roughly 29% optimistic. It is left in place on purpose, because changing it
-// changes the docs/MODEL.md section 9 worked example and anti-pattern 9 requires
-// the derivation to be redone by hand first. Phase 3 replaces this constant with
-// a measured value anyway. See PLAN.md Finding 10.
+// hbmBytesPerSec here is the A100 80GB figure of about 2.0 TB/s while every
+// measurement in this project comes from a 40GB card at about 1.555 TB/s, which
+// makes the HBM roofline roughly 29% optimistic. Left in place because it anchors
+// the worked example in test-model.cpp, and because a calibrated json replaces it.
 HardwareModel HardwareModel::a100() {
     HardwareModel h;
     h.name = "A100-80GB (datasheet placeholders, replace with calibration)";
