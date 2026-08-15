@@ -25,6 +25,7 @@ Run:  python3 bench/triton-compare.py
 Needs: triton, torch, an NVIDIA GPU, and build/ridge-predict already built.
 """
 
+import math
 import sys
 import time
 
@@ -181,13 +182,31 @@ def main():
         # advance would just be a guess about where quality breaks.
         ranked = [i for _, i in scored if i in timings]
         per_cfg = stock_wall / max(len(timings), 1)
+        # Baselines at the SAME budget. Any pruner benchmarking k of n configs
+        # gets the identical speedup, so speedup does not distinguish pruners at
+        # all. The only question that does is whether the winner survives the
+        # cut, which is why these two are here.
+        #   random: expected best-of-k drawn uniformly, exact via order stats
+        #   first-k: take Triton's list as written and truncate it
+        ms_sorted = sorted(timings.values())
+        n_cfg = len(ms_sorted)
+        best_ms = ms_sorted[0]
+        in_order = [i for i in range(len(CONFIGS)) if i in timings]
         for k in K_SWEEP:
             if k > len(ranked):
                 continue
             pick = min(ranked[:k], key=timings.get)
             reg = (timings[pick] - timings[stock_pick]) / timings[stock_pick] * 100
             wall = model_wall + per_cfg * k
-            curve[k].append((reg, pick == stock_pick, stock_wall, wall))
+            exp_min = 0.0
+            denom = math.comb(n_cfg, k)
+            for idx, val in enumerate(ms_sorted):
+                ways = math.comb(n_cfg - 1 - idx, k - 1) if n_cfg - 1 - idx >= k - 1 else 0
+                exp_min += val * ways / denom
+            rnd_reg = (exp_min - best_ms) / best_ms * 100
+            fk = min(in_order[:k], key=timings.get)
+            fk_reg = (timings[fk] - best_ms) / best_ms * 100
+            curve[k].append((reg, pick == stock_pick, stock_wall, wall, rnd_reg, fk_reg))
 
         shortlist = ranked[:TOP_K]
         if not shortlist:
@@ -219,7 +238,11 @@ def main():
         print("shortlist size vs quality. stock benchmarks every config and is")
         print("always optimal, so regret is measured against its pick.")
         print()
-        print("  %5s %10s %12s %12s %10s" % ("top_k", "speedup", "same pick", "mean regret", "max regret"))
+        print("  every pruner at budget k gets the same speedup, so only the")
+        print("  regret columns compare pruners against each other.")
+        print()
+        print("  %5s %10s %12s %12s %10s %11s %11s" % (
+            "top_k", "speedup", "same pick", "RIDGE mean", "RIDGE max", "random", "first-k"))
         for k in K_SWEEP:
             rows = curve[k]
             if not rows:
@@ -228,7 +251,10 @@ def main():
             hits = sum(1 for r in rows if r[1])
             mr = sum(r[0] for r in rows) / len(rows)
             xr = max(r[0] for r in rows)
-            print("  %5d %9.2fx %9d/%-2d %11.2f%% %9.2f%%" % (k, sp, hits, len(rows), mr, xr))
+            rnd = sum(r[4] for r in rows) / len(rows)
+            fkm = sum(r[5] for r in rows) / len(rows)
+            print("  %5d %9.2fx %9d/%-2d %11.2f%% %9.2f%% %11.2f%% %11.2f%%" % (
+                k, sp, hits, len(rows), mr, xr, rnd, fkm))
 
 
 if __name__ == "__main__":
