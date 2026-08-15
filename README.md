@@ -2,7 +2,7 @@
 
 ridge predicts how fast a tensor-core GEMM will run on an A100 before you compile or run it. Hand it a tile configuration and it returns sustained throughput along with the hardware resource that limits it: tensor-core issue, shared-memory bandwidth, HBM, occupancy, or an underfilled grid.
 
-I wanted to know whether a model built that way is accurate enough to be worth having. It lands at 16% mean error, which is too loose to trust as a throughput estimate but good enough to cut an autotuning search by 2.4x with no measurable loss.
+I wanted to know whether a model built that way is accurate enough to be worth using. It lands at 16% mean error, which is too loose to trust as a throughput estimate but good enough to cut an autotuning search by 2.4x with no measurable loss.
 
 ## Architecture
 
@@ -111,12 +111,9 @@ Ridge is a calibrated roofline. TileSight builds a producer-consumer DAG and sea
 | tritonBLAS (analytical selection) | 94.7% of exhaustive vs 91.3% | Their selection is purely analytical with no benchmarking. Ridge's 91.3% is its top-1 pick, and the lossless number needs 10 measured runs. | Improve ranking, not magnitude. Four problem shapes still rank negatively. |
 | Ridge's own worst configs | 38.93% MAPE on 42 of 336 configs | All at exactly 4 active warps per SM, where the occupancy term saturates to 1.0. Excluding them MAPE is 13.16%. | Unknown. The obvious explanation was that the latency benchmark measured saturation at higher ILP than the kernel carries, but sweeping ILP 1 through 8 puts it at 4 warps every time, so the hypothesis is refuted and the cause is open. |
 
-That last row is the honest state of the model. The error is concentrated in one config class with a known trigger and no known mechanism.
-
 ## Benchmarks
 
 ```bash
-# One command on a fresh GPU box: check MIG, lock clocks, build, calibrate
 ./setup-box.sh
 
 # Kernel correctness against a float64 reference, then throughput vs cuBLAS
@@ -140,7 +137,7 @@ python3 bench/triton-compare.py
 
 ## Getting started
 
-The model itself needs no GPU. Everything builds in Docker.
+Build is already setup for Docker (or you can also do it without Docker, if you want)
 
 ```bash
 docker compose build                                    # one-time
@@ -160,7 +157,7 @@ step: 768 cyc = 512 mma + 256 ldmatrix, in series
 envelope eff: 0.975   128 K-steps   prologue 832 cyc   epilogue 1663 cyc
 ```
 
-Pass `--hw data/hardware/a100-sxm4-40gb.json` to use measured constants instead of datasheet placeholders. The tool says which it used.
+Pass `--hw data/hardware/a100-sxm4-40gb.json` to use measured constants instead of datasheet placeholders.
 
 ## Testing
 
@@ -178,7 +175,7 @@ One GPU (A100), one dtype (FP16), dense GEMM. The model's terms are derived for 
 
 ## Next steps
 
-In the order I would do them.
+The are ranked in priority (Number 1 being highest priority or what I believe might be the most impactful).
 
 **1. Find the 4-active-warp mechanism.** This is worth about 3 points of MAPE and it is the only error large enough to matter. 42 of 336 configs over-predict by 39%, all at exactly 4 active warps per SM, and excluding them the model sits at 13.16%. The ILP explanation is already ruled out by the sweep in `cal-latency`. The next hypothesis is barrier cost: with one resident CTA every `__syncthreads` stalls the whole SM, and with two the other CTA covers it, which fits the sign and roughly the size. Test it with a microbenchmark that varies resident CTAs at fixed warp count before adding any term to the model.
 
