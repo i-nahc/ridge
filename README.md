@@ -1,36 +1,29 @@
 # ridge
 
-ridge predicts how fast a tensor-core GEMM will run on an A100 before you compile or run it. Hand it a tile configuration and it returns sustained throughput along with the hardware resource that limits it: tensor-core issue, shared-memory bandwidth, HBM, occupancy, or an underfilled grid.
+ridge predicts how fast a tensor-core GEMM will run on an A100 before compilation. Using a tile configuration, it returns sustained throughput along with what hardware resource limits it: tensor-core issue, shared memory bandwidth, HBM, occupancy, or an underfilled grid.
 
-I wanted to know whether a model built that way is accurate enough to be worth using. It lands at 16% mean error, which is too loose to trust as a throughput estimate but good enough to cut an autotuning search by 2.4x with no measurable loss.
+This project was mostly just to learn how profilers are made and it doesn't really constitute a production ready product. It has a somewhat respectable mean error of 16%, which is still a bit worse than other profilers. It also is able to use the data to losslessly prune the autotuning search, reducing the number of searches by about 2.4x.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  A[cal-mma<br/>cal-smem-bw<br/>cal-hbm-bw<br/>cal-latency] --> B[hardware.json<br/>4 measured constants]
-  C[tile config<br/>BM BN BK, warp, stages] --> D
-  B --> D[cost model<br/>stage times, occupancy,<br/>waves, envelope]
-  D --> E[compute ceiling]
-  D --> F[HBM roofline<br/>+ L2 reuse]
-  E --> G{min}
-  F --> G
-  G --> H[TFLOP/s + binding resource]
-  H --> I[autotuner<br/>rank, keep top-k]
-  I --> J[benchmark survivors<br/>pick fastest]
+```
+4 microbenchmarks -> hardware constants
+tile config -> cost model -> throughput + bottleneck -> rank -> benchmark top k -> best config
 ```
 
 ## The four pieces
 
 ### Model
 
-A multi-stage roofline, closed form, O(1) per config. Per K-step it computes tensor time from the calibrated MMA issue cost and shared-memory time from the `ldmatrix` byte traffic. Those two add rather than overlap, which is the one place the ISA forces a dependency: `cp.async` is asynchronous by construction so global traffic really does hide under compute, but `ldmatrix` is synchronous and the next `mma` consumes the registers it just wrote. Modelling that as a `max` gives 36% MAPE and as a sum gives 30%, everything else held fixed.
+The model works out how long one K-step takes for a single block, then scales that up to the whole problem. Tensor time comes from the measured cost of one `mma` instruction. Shared memory time comes from how many bytes `ldmatrix` has to pull out.
 
-On top of that sit three deratings: occupancy against the shared-memory, register and warp limits, wave quantization for grids that do not divide evenly across 108 SMs, and a prologue/epilogue envelope for the pipeline fill and accumulator drain. The prediction is the smaller of a compute ceiling and an HBM roofline, and whichever term is furthest from 1.0 becomes the reported bottleneck.
+Those two get added together rather than overlapped, which is the one thing here I would call a real finding. Copies from global memory run in the background, so those do hide behind compute, but `ldmatrix` does not, because the very next `mma` needs the registers it just wrote. Assuming they overlap gives 36% mean error. Adding them gives 30%, with nothing else changed.
+
+After that, four things scale the number down: too few warps to hide latency, a grid that doesn't divide evenly across the 108 SMs, time spent filling and draining the pipeline, and how much of the data gets reused out of L2 instead of refetched. The answer is whichever is smaller, the compute limit or the bandwidth limit, and whichever of the four penalties is largest gets reported as the bottleneck.
 
 ### Calibrate
 
-Four CUDA microbenchmarks measure the constants on the card being used, rather than reading them off a datasheet. The datasheet figures are kept only as sanity bands to catch a broken benchmark.
+Four small CUDA programs measure the constants on the GPU you are running (some A100 variant), instead of directly using the spec sheet as I found in my testing that there was some noticeable delta from the spreadsheet (~5%). The spec numbers are only kept around as a sanity range so obviously broken benchmarks can be caught.
 
 | Constant | Measured | Datasheet | |
 |---|---|---|---|
@@ -39,23 +32,23 @@ Four CUDA microbenchmarks measure the constants on the card being used, rather t
 | `hbmBytesPerSec` | 1.462 TB/s | 1.555 TB/s | 94.0% |
 | `warpsNeededToHide` | 4 warps/SM | saturation point, swept across ILP 1-8 | |
 
-The MMA benchmark is the one that is easy to get wrong. Throughput is not latency, so a loop accumulating into the same registers measures the dependency chain and gives a constant several times too large. Each warp keeps eight independent accumulator sets to avoid that.
+Initially, I had some trouble with the MMA one. For example, if the loop keeps accumulating into the same registers then each instruction waits on the previous one, so you end up timing how long an instruction takes to finish rather than how fast they can be issued, and the constant comes out way larger than it should be. The solution I came up with is to keep eight independent warp accumulators going.
 
 ### Autotune
 
-The model ranks candidate tile configs, the top *k* get benchmarked, and the fastest of those wins. The model prunes, the hardware decides.
+The model ranks all the candidate configs, then only the top few get benchmarked, and the fastest of those wins.
 
-This split is the whole design. Ridge's ranking is mean Spearman 0.65 with worst-case regret near 48%, so letting it choose a config outright gives a weak answer. Pruning asks something much easier of it: not "which config is fastest" but "is the fastest config somewhere in your top ten". A mediocre ranker is still a good filter, and the measurement step recovers the exact optimum.
+The reason for splitting it up like this is that the model has some gaps, so it not yet good enough to just pick one by itself. I suspect that some of this is due to the ties, as the swizzle isn't modelled so some of the configs have the same predicted performance. There are some other sources of this, but this is likely one of the issues, and this could be solved by adding an input that can break those ties, but I haven't got around to doing that yet.
 
 ### Validate
 
-A hand-written FP16 tensor-core GEMM is the ground truth the model is checked against. It uses a multi-stage `cp.async` pipeline, `ldmatrix` for register fragments, `mma.sync.m16n8k16` with FP32 accumulate, 16-byte row padding for bank conflicts, and a CTA swizzle for L2 locality. 24 template variants, spill-free, and it reaches 73% of cuBLAS.
+To check any of this I made a simple FP16 tensor core GEMM. It uses a multi-stage `cp.async` pipeline, `ldmatrix` to get operands into registers, `mma.sync.m16n8k16` with FP32 accumulate, 16-byte row padding to avoid bank conflicts, and a block swizzle to get better L2 hit rates. It manages to get to 73% of cuBLAS, although in the future I want to try to at least push for ~85%, although I haven't quite figured out (definitively) what needs to change to get that.
 
 ## Results
 
 ### Autotuning
 
-14 problem shapes x 24 tile configs, held out. Regret is against the exhaustive best, meaning the fastest config actually measured for that shape.
+ Regret means how much slower the picked config is than the best one that was actually measured for that shape.
 
 | top k | benchmarks | vs exhaustive | mean regret | worst regret | exact optimum |
 |---|---|---|---|---|---|
@@ -65,20 +58,7 @@ A hand-written FP16 tensor-core GEMM is the ground truth the model is checked ag
 | **10** | **140** | **2.4x** | **0.00%** | **0.05%** | **13/14** |
 | 20 | 280 | 1.2x | 0.00% | 0.00% | 14/14 |
 
-At k=10 the pruned search is effectively lossless. The k=1 row is why this is built as a pruner and not a selector.
-
-### Accuracy
-
-The model was developed against one GPU session and validated on a second, independently recalibrated and re-measured, that it had never been tuned against.
-
-| | development | held out |
-|---|---|---|
-| MAPE | 16.35% | **16.38%** |
-| median absolute error | 11.77% | 11.87% |
-| p90 absolute error | 33.54% | 33.50% |
-| mean Spearman, per shape | 0.650 | 0.653 |
-
-A 0.03 point gap between the two is the useful number here, since it says the terms generalize rather than memorize. The problem shapes were committed to `data/sweep/phase4-registered.csv` before any measurement existed, so the accuracy figure cannot come from quietly dropping configs the model handles badly.
+At k=10 you get the same config a full search would have found on 13 of the 14 shapes, and on the last one you lose 0.05%.
 
 ### Kernel
 
@@ -89,7 +69,7 @@ A 0.03 point gap between the two is the useful number here, since it says the te
 | K=128 | **106.2% of cuBLAS** |
 | register spills | none, all 24 variants |
 
-The K=128 result is the interesting one. cuBLAS is tuned for large K, and a correctly chosen tile beats it when there is little K to amortize over.
+Somewhat surprisingly, for K=128 the kernel I made for testing is slightly better than cuBLAS, but I also guess in some ways that's expected since cuBLAS is meant for larger K-values, so realistically, if there is one I perform better on it should be for small K.
 
 ## How it compares
 
@@ -97,19 +77,18 @@ The K=128 result is the interesting one. cuBLAS is tuned for large K, and a corr
 
 | Comparison | Result | Why it matters |
 |---|---|---|
-| Exhaustive autotuning | Same config on 13/14 shapes, 2.4x fewer benchmarks | The model never has to be right about magnitude, only about keeping the winner in a shortlist. |
-| Occupancy and roofline heuristics | Those score 9.1% and 10.9% regret at k=8, against 3.6% for random | Standard heuristics are not noisy here, they are biased toward large tiles that lose to wave quantization, so they underperform a uniform sample. |
-| Nsight Compute bottleneck labels | 8/8 on `SMEM` and `WAVES` | Achieved warps also matched theoretical warps on all 12 profiled configs, which independently confirms the occupancy math. |
+| Exhaustive autotuning | Same config on 13/14 shapes, 2.4x fewer benchmarks | Despite not being 100% accurate, the best config is still selected. |
+| Occupancy and roofline heuristics | 9.1% and 10.9% regret at k=8, against 3.6% for picking at random | Both prefer large tiles, but large tiles also mean fewer blocks, which means GPU idling, which might cause random picking winning sometimes |
+| Nsight Compute bottleneck labels | 8/8 on `SMEM` and `WAVES` | Measured warp counts also matched what the model expected on all 12 profiled configs. |
 
 ### Against published models
 
-Ridge is a calibrated roofline. TileSight builds a producer-consumer DAG and searches legal orderings, which is a different class of model, and the gap shows.
+I used some papers to try to understand what profilers are doing these days (or where they are going). I didn't understand a lot of the math, but I was still able to use some of their findings here. TileSight is one paper I referred to a lot, it's not out yet, but it should have a repo once the paper gets published
 
-| Comparison | Result | Where the gap comes from | How to close it |
+| Comparison | Result | Details | How to close it |
 |---|---|---|---|
-| TileSight (single-GPU GEMM MAPE) | 12.35% vs 16.38% | Their 12.35% is pooled across A100, H200, B200 and B6000, a much wider scope than one card and one dtype. Ridge is behind on an easier problem. | Model the dependency graph rather than hard-coding one edge. |
-| tritonBLAS (analytical selection) | 94.7% of exhaustive vs 91.3% | Their selection is purely analytical with no benchmarking. Ridge's 91.3% is its top-1 pick, and the lossless number needs 10 measured runs. | Improve ranking, not magnitude. Four problem shapes still rank negatively. |
-| Ridge's own worst configs | 38.93% MAPE on 42 of 336 configs | All at exactly 4 active warps per SM, where the occupancy term saturates to 1.0. Excluding them MAPE is 13.16%. | Unknown. The obvious explanation was that the latency benchmark measured saturation at higher ILP than the kernel carries, but sweeping ILP 1 through 8 puts it at 4 warps every time, so the hypothesis is refuted and the cause is open. |
+| TileSight (single-GPU GEMM MAPE) | 12.35% vs 16.38% | About 4% behind the accuracy of TileSight | Not entirely sure, I suspect it has to do with dependencies b/w operations |
+| tritonBLAS (analytical selection) | 94.7% of exhaustive vs 91.3% | 5% slower on tritonBLAS vs 9% slower for my model. This is if we just guess a config | Not entirely sure, it could be due to how the model is biasing towards configs that are some how overutilizing resources, and the lack of tie breakers for some configs means we can't differentiate them. Need to investigate further. |
 
 ## Benchmarks
 
@@ -119,19 +98,20 @@ Ridge is a calibrated roofline. TileSight builds a producer-consumer DAG and sea
 # Kernel correctness against a float64 reference, then throughput vs cuBLAS
 ./build/check-gemm
 
-# The measurement sweep, 336 configs, 4-8 min, use tmux
+# measurement sweep, 336 configs, takes around 4 minutes
 ./build/measure
 
 # Model accuracy and per-shape ranking against the sweep
 python3 bench/validate.py
 
-# Autotuner: shortlist size vs regret. Runs offline, no GPU needed
+# Autotuner: shortlist size vs regret.
 python3 tools/ridge-autotune.py
 
 # Bottleneck labels vs Nsight Compute, 12 pre-registered configs
 bash bench/run-ncu-validation.sh
 
-# Ridge as a pruner for Triton's own GEMM autotuner
+# ridge as a pruner for Triton's GEMM autotuner
+# this is just a test for fun, I never really used this nor did I intend for this to be done
 python3 bench/triton-compare.py
 ```
 
@@ -165,22 +145,20 @@ Pass `--hw data/hardware/a100-sxm4-40gb.json` to use measured constants instead 
 docker compose run --rm dev ./build/test-model
 ```
 
-`test-model` pins a worked example value by value, so a math regression that happens to preserve the invariants still fails. The numbers in it are derived by hand rather than pasted from program output, which is the only thing that makes it an independent check rather than a snapshot of whatever the code currently does.
+`test-model` runs the model on one config and checks each intermediate value against numbers I worked out by hand (or I guess by calculator).
 
-The kernel has its own gate in `check-gemm`, which self-tests first: it feeds the comparison deliberately corrupted results and asserts every one is rejected. A correctness check that cannot fail says nothing when it passes, and this one caught two real bugs, a phantom prologue tile when K is shorter than the pipeline depth and an epilogue racing in-flight `cp.async`.
+`check-gemm` tests the kernel against a float64 reference. It starts with a self test, feeding the comparison a few deliberately wrong results to make sure they get rejected, this is mostly just a sanity check.
 
 ## Scope
 
-One GPU (A100), one dtype (FP16), dense GEMM. The model's terms are derived for the kernel structure in `bench/kernels/`, so applying it to a kernel with a different overlap pattern is out of scope rather than merely inaccurate. It also has no term for the CTA swizzle, so it predicts identically across every swizzle group.
+One GPU (A100), one data type (FP16). The model was written around the kernel in `bench/kernels/`, so a kernel that overlaps its work differently is outside what this covers. There is also no term for the block swizzle, so it predicts the same number for every swizzle setting even though they measure differently, this is something I hope to address in the future
 
 ## Next steps
 
-The are ranked in priority (Number 1 being highest priority or what I believe might be the most impactful).
+These are ranked in priority (Number 1 being highest priority or what I believe might be the most impactful).
 
-**1. Find the 4-active-warp mechanism.** This is worth about 3 points of MAPE and it is the only error large enough to matter. 42 of 336 configs over-predict by 39%, all at exactly 4 active warps per SM, and excluding them the model sits at 13.16%. The ILP explanation is already ruled out by the sweep in `cal-latency`. The next hypothesis is barrier cost: with one resident CTA every `__syncthreads` stalls the whole SM, and with two the other CTA covers it, which fits the sign and roughly the size. Test it with a microbenchmark that varies resident CTAs at fixed warp count before adding any term to the model.
+**1. Work out what happens at 4 active warps.** This would help close the error and it's the only mistake in this design that is major enough to make a significant impact. 42 of 336 configs over predict by 39%, at exactly 4 active warps per SM, and without them the model sits at 13.16%.
 
-**2. Model the CTA swizzle.** `GemmConfig` has no field for it, so the model predicts identically across all six swizzle groups in the sweep while they measure differently. The L2 reuse term already assumes the resident CTAs form a square region, which is exactly what the swizzle controls, so this is making an existing assumption explicit rather than adding a new mechanism.
+**2. Model the block swizzle.** There is no field for it in `GemmConfig`, so all six swizzle settings in the sweep get the same prediction even though they measure differently. The L2 reuse term already assumes the resident blocks cover a roughly square region, and the swizzle is exactly what controls that, so this is more about making an existing assumption explicit than adding anything new. This should be a relatively small amount of work, so realistically this might be number 1 in priority.
 
-**3. Add a dependency graph.** The model hard-codes one edge, `ldmatrix` before `mma`, and combines everything else with a `max` that assumes perfect overlap. I built the per-operation resource vector to test whether that was the gap and it changed nothing: under a `max` across resources the tensor pipe dominates at 519 cycles against 384, 116 and 96, so the prediction comes out identical to the two-stage model. The decomposition only helps with an ordering search on top of it, and that ordering search is the real work. It is also what separates this from published models, and it is a rewrite rather than an addition.
-
-**4. Fused kernels, then H100.** The per-K-step stage time is built from exactly two operations because that is a GEMM's entire inner loop, so a fused bias and activation would be predicted exactly as fast as the unfused version. That is the case where step 3's resource vector finally pays for itself, which is why it comes after. H100 is a recalibration for the constants but a structural change for TMA, warp-group MMA and distributed shared memory.
+**3. Track dependencies between operations.** Right now the model hard codes one dependency, `ldmatrix` before `mma`, and assumes everything else overlaps perfectly. I tried breaking the work down per operation to see if that was the gap and it didn't change anything. But this requires a pretty major rewrite, but it could also be a major benefit to the project as it solved a lot of the problems it currently has (but I put it as number 3 since it is such a large change)
