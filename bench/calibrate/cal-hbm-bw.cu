@@ -1,21 +1,6 @@
 // cal-hbm-bw.cu measures hbmBytesPerSec: sustained HBM read bandwidth for the
 // whole GPU.
-//
-// THE TRAP HERE IS L2. An A100 has 40 MB of L2. A streaming benchmark over a
-// buffer that fits, or even nearly fits, in L2 measures L2 bandwidth and reports
-// it as HBM. The number comes out several times too high, looks plausible
-// because it is merely "fast", and then the model's HBM roofline is wrong in the
-// optimistic direction for every memory-bound config. The buffer below is 4 GB,
-// two orders of magnitude past L2, so every access misses.
-//
-// Timed with CUDA events rather than clock64 because this is a device-wide rate,
-// not a per-SM one, and the whole GPU has to be saturated for the number to mean
-// anything.
-//
-// Read-only rather than copy. The model's HBM term counts operand traffic into
-// shared memory, which is a read stream. A copy benchmark would report a
-// read+write figure that does not correspond to anything the model uses
-// section 5.
+
 
 #include "cal-common.cuh"
 
@@ -25,7 +10,7 @@
 namespace {
 
 // Two orders of magnitude beyond the 40 MB L2, so the L2 hit rate is negligible
-// and this is genuinely a DRAM measurement.
+// and this is a DRAM measurement.
 constexpr size_t kBufferBytes = 4ull * 1024 * 1024 * 1024;
 constexpr size_t kFloat4Count = kBufferBytes / sizeof(float4);
 
