@@ -11,7 +11,7 @@ This project was mostly just to learn how profilers are made and it doesn't real
 tile config -> cost model -> throughput + bottleneck -> rank -> benchmark top k -> best config
 ```
 
-## The four pieces
+## Methodology
 
 ### Model
 
